@@ -1,0 +1,25 @@
+# Secrets and environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Project runtime outputs
+data/
+*.log
+*.jsonl
+
+# Tools
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+uv.lock
