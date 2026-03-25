@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum
+
+class StrEnum(str, Enum):
+    def __str__(self) -> str:
+        return self.value
 from typing import Annotated
 import secrets
 from uuid import uuid4

@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     paper_max_position_usd: float = Field(default=10.0)
     max_open_positions: int = Field(default=10)
 
+    # Crypto bot
+    crypto_enabled:          bool  = Field(default=True)
+    crypto_min_edge:         float = Field(default=0.10)
+    crypto_max_position_usd: float = Field(default=5.0)
+    crypto_edge_collapse:    float = Field(default=0.02)
+
     # Web dashboard
     web_enabled: bool = Field(default=True)
     web_host:    str  = Field(default="0.0.0.0")

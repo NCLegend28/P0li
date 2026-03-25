@@ -80,9 +80,21 @@ async def scan_loop(
         t0 = time.monotonic()
 
         # ── Run pipeline (open positions injected via state) ──────────────────
-        result = await graph.ainvoke(
-            ScanState(scan_number=scan_n, open_positions=list(trader.positions.values()))
-        )
+        try:
+            result = await graph.ainvoke(
+                ScanState(scan_number=scan_n, open_positions=list(trader.positions.values()))
+            )
+        except Exception as exc:
+            ds.scan_duration = round(time.monotonic() - t0, 1)
+            dash.log(f"Scan [bold cyan]#{scan_n}[/] failed: [red]{exc.__class__.__name__}: {exc}[/] — retrying next interval", "WARN")
+            logger.warning(f"Scan #{scan_n} failed with {exc!r}")
+            sleep_total = settings.scan_interval_seconds
+            elapsed = 0.0
+            while elapsed < sleep_total and not bot_state.stop_event.is_set():
+                ds.next_scan_in = max(0.0, sleep_total - elapsed)
+                await asyncio.sleep(1.0)
+                elapsed += 1.0
+            continue
 
         ds.scan_duration = round(time.monotonic() - t0, 1)
 
@@ -90,6 +102,7 @@ async def scan_loop(
         exit_signals = _extract(result, "exit_signals",  [])
         filtered     = _extract(result, "filtered_markets", [])
         raw          = _extract(result, "raw_markets", [])
+        coin_cache   = _extract(result, "coin_cache", {})
 
         # ── Update dashboard state from scan results ───────────────────────────
         ds.opportunities    = opps
@@ -102,6 +115,25 @@ async def scan_loop(
         ds.forecasts_fetched= len(set(
             o.notes.split()[0] for o in opps if o.notes
         ))
+
+        # Crypto market feed (with spot + sigma from coin cache)
+        from polybot.api.coingecko import CoinGeckoClient
+        raw_crypto = [m for m in raw if m.category == "crypto"]
+        crypto_feed_items = []
+        for m in raw_crypto:
+            cid  = CoinGeckoClient.coin_id_from_question(m.question)
+            coin = coin_cache.get(cid) if cid else None
+            crypto_feed_items.append({
+                "id":                m.id,
+                "question":          m.question,
+                "yes_price":         m.yes_price,
+                "liquidity_usd":     m.liquidity_usd,
+                "hours_until_close": m.hours_until_close,
+                "spot_usd":          coin.spot_usd if coin else None,
+                "sigma_daily":       CoinGeckoClient.daily_volatility(coin.daily_ohlc) if coin else None,
+                "coin_id":           cid or "",
+            })
+        ds.crypto_feed = crypto_feed_items
 
         # Weather market feed for right panel
         # Build feed from ALL raw weather markets (not just filtered)
@@ -312,7 +344,7 @@ async def main() -> None:
         # Web, telegram, and renderer failures are logged but non-fatal.
         scanner_task = next(t for t in tasks if t.get_name() == "scanner")
         await asyncio.wait([scanner_task])
-        done, pending = {scanner_task}, set(t for t in tasks if t is not scanner_task)
+        pending = set(t for t in tasks if t is not scanner_task)
 
         for task in pending:
             task.cancel()

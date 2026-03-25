@@ -23,11 +23,13 @@ from loguru import logger
 
 import httpx
 
+from polybot.api.coingecko import CoinData, CoinGeckoClient
 from polybot.api.gamma import GammaClient
 from polybot.api.openmeteo import CityForecast, OpenMeteoClient
 from polybot.config import settings
 from polybot.models import MarketCategory
 from polybot.scanner.state import ScanState
+from polybot.strategies.crypto import evaluate_crypto_markets
 from polybot.strategies.exit import ExitSignal, compute_exit_signals
 from polybot.strategies.weather import evaluate_weather_markets, parse_question
 
@@ -58,6 +60,52 @@ async def filter_markets(state: ScanState) -> dict[str, Any]:
     ]
     logger.info(f"Filter: {len(state.raw_markets)} → {len(filtered)}")
     return {"filtered_markets": filtered}
+
+
+# ─── Node: fetch_crypto_prices ───────────────────────────────────────────────
+
+async def fetch_crypto_prices(state: ScanState) -> dict[str, Any]:
+    if not settings.crypto_enabled:
+        logger.info("Crypto bot disabled — skipping price fetch")
+        return {"coin_cache": {}}
+
+    crypto_markets = [
+        m for m in state.filtered_markets
+        if m.category == MarketCategory.CRYPTO
+    ]
+
+    if not crypto_markets:
+        logger.info("No crypto markets found")
+        return {"coin_cache": {}}
+
+    # Collect unique coin IDs needed for active markets
+    coin_ids: set[str] = set()
+    for m in crypto_markets:
+        cid = CoinGeckoClient.coin_id_from_question(m.question)
+        if cid:
+            coin_ids.add(cid)
+
+    if not coin_ids:
+        logger.info("No parseable coins in crypto markets")
+        return {"coin_cache": {}}
+
+    logger.info(f"Fetching CoinGecko data for {len(coin_ids)} coins: {sorted(coin_ids)}")
+
+    # Serial fetches with a 2s gap — free tier is 30 req/min; each coin = 3 calls,
+    # so 4 coins = 12 calls. Spacing them avoids bursting into the rate limit.
+    coin_cache: dict[str, CoinData] = {}
+    async with CoinGeckoClient() as cg:
+        for i, coin_id in enumerate(sorted(coin_ids)):
+            if i > 0:
+                await asyncio.sleep(4.0)
+            try:
+                data = await cg.fetch_coin(coin_id)
+                coin_cache[coin_id] = data
+            except Exception as exc:
+                logger.warning(f"CoinGecko failed for {coin_id}: {exc}")
+
+    logger.info(f"CoinGecko: {len(coin_cache)}/{len(coin_ids)} coins fetched")
+    return {"coin_cache": coin_cache}
 
 
 # ─── Node: fetch_forecasts ────────────────────────────────────────────────────
@@ -133,6 +181,26 @@ async def run_strategies(state: ScanState) -> dict[str, Any]:
             f"(markets={len(weather_markets)}, forecasts={len(state.forecast_cache)})"
         )
 
+    crypto_markets = [
+        m for m in state.filtered_markets
+        if m.category == MarketCategory.CRYPTO
+    ]
+
+    if settings.crypto_enabled and crypto_markets and state.coin_cache:
+        opps = evaluate_crypto_markets(
+            markets    = crypto_markets,
+            coin_cache = state.coin_cache,
+            min_edge   = settings.crypto_min_edge,
+        )
+        all_opps.extend(opps)
+        logger.info(f"Crypto strategy → {len(opps)} opportunities")
+    else:
+        logger.info(
+            f"Crypto strategy → skipped "
+            f"(enabled={settings.crypto_enabled}, markets={len(crypto_markets)}, "
+            f"coins={len(state.coin_cache)})"
+        )
+
     return {"opportunities": all_opps}
 
 
@@ -201,22 +269,24 @@ async def monitor_positions(state: ScanState) -> dict[str, Any]:
 def build_scanner_graph() -> Any:
     """
     Pipeline:
-      fetch_markets → filter_markets → fetch_forecasts
+      fetch_markets → filter_markets → fetch_forecasts → fetch_crypto_prices
         → run_strategies → monitor_positions → END
     """
     builder = StateGraph(ScanState)
 
-    builder.add_node("fetch_markets",      fetch_markets)
-    builder.add_node("filter_markets",     filter_markets)
-    builder.add_node("fetch_forecasts",    fetch_forecasts)
-    builder.add_node("run_strategies",     run_strategies)
-    builder.add_node("monitor_positions",  monitor_positions)
+    builder.add_node("fetch_markets",       fetch_markets)
+    builder.add_node("filter_markets",      filter_markets)
+    builder.add_node("fetch_forecasts",     fetch_forecasts)
+    builder.add_node("fetch_crypto_prices", fetch_crypto_prices)
+    builder.add_node("run_strategies",      run_strategies)
+    builder.add_node("monitor_positions",   monitor_positions)
 
     builder.set_entry_point("fetch_markets")
-    builder.add_edge("fetch_markets",     "filter_markets")
-    builder.add_edge("filter_markets",    "fetch_forecasts")
-    builder.add_edge("fetch_forecasts",   "run_strategies")
-    builder.add_edge("run_strategies",    "monitor_positions")
-    builder.add_edge("monitor_positions", END)
+    builder.add_edge("fetch_markets",       "filter_markets")
+    builder.add_edge("filter_markets",      "fetch_forecasts")
+    builder.add_edge("fetch_forecasts",     "fetch_crypto_prices")
+    builder.add_edge("fetch_crypto_prices", "run_strategies")
+    builder.add_edge("run_strategies",      "monitor_positions")
+    builder.add_edge("monitor_positions",   END)
 
     return builder.compile()

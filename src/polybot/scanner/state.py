@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from polybot.api.coingecko import CoinData
 from polybot.api.openmeteo import CityForecast
 from polybot.models import Market, Opportunity, PaperTrade
 from polybot.strategies.exit import ExitSignal
@@ -31,6 +32,9 @@ class ScanState(BaseModel):
 
     # Built by fetch_forecasts, consumed by run_strategies and monitor_positions
     forecast_cache: dict[str, CityForecast] = Field(default_factory=dict)
+
+    # Built by fetch_crypto_prices, consumed by run_strategies
+    coin_cache: dict[str, CoinData] = Field(default_factory=dict)
 
     # Metadata
     scan_number: int = 0
