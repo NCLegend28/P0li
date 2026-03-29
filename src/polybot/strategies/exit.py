@@ -37,6 +37,7 @@ class ExitReason(StrEnum):
     EDGE_COLLAPSED = "edge_collapsed"
     MARKET_CLOSED  = "market_closed"
     TIME_STOP      = "time_stop"        # market closing in < 30 min
+    PREGAME_LOCK   = "pregame_lock"     # sports: exit before game tip-off
 
 
 @dataclass
@@ -56,6 +57,7 @@ def compute_exit_signals(
     profit_target_multiplier: float = 1.8,   # exit when price = entry * 1.8
     edge_collapse_threshold:  float = 0.03,  # edge fell below 3%
     time_stop_hours:          float = 0.5,   # close if < 30 min to resolution
+    pregame_lock_hours:       float = 0.083, # sports: exit 5 min before tip-off
 ) -> list[ExitSignal]:
     """
     For each open position, decide whether to exit and at what price.
@@ -80,6 +82,21 @@ def compute_exit_signals(
         # Convert YES price to our-side price
         current_side_price = current_yes if trade.side == Side.YES else (1 - current_yes)
         hours_left = hours_to_close.get(trade.market_id, 999.0)
+
+        # ── Pregame lock (sports): exit 5 min before tip-off ─────────────────
+        if trade.live_platform == "polymarket_us" and hours_left < pregame_lock_hours:
+            signals.append(ExitSignal(
+                trade_id      = trade.id,
+                reason        = ExitReason.PREGAME_LOCK,
+                exit_price    = current_side_price,
+                current_price = current_side_price,
+                note          = f"Pregame lock: {hours_left * 60:.0f}min to tip-off",
+            ))
+            logger.info(
+                f"🔒 PREGAME LOCK {trade.question[:45]} | "
+                f"exit={current_side_price:.3f} | {hours_left * 60:.0f}min left"
+            )
+            continue
 
         # ── Time stop ──────────────────────────────────────────────────────────
         if hours_left < time_stop_hours:

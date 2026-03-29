@@ -190,31 +190,54 @@ class TelegramAlerter:
         )
 
     async def alert_opportunity(self, opp) -> None:
+        from polybot.config import settings
+        mode = "LIVE" if settings.live_trading else "PAPER"
         await self.send(
-            f"\U0001f3af NEW OPPORTUNITY\n"
+            f"\U0001f3af [{mode}] NEW OPPORTUNITY\n"
             f"{opp.market.question[:70]}\n"
             f"Side: {opp.side}  @  {opp.market_price:.3f}  Edge: {opp.edge_pct}\n"
             f"{opp.notes[:80]}"
         )
 
     async def alert_trade_opened(self, trade) -> None:
+        from polybot.config import settings
+        mode  = "LIVE" if settings.live_trading else "PAPER"
+        extra = f"  order={trade.clob_order_id[:8]}" if trade.clob_order_id else ""
         await self.send(
-            f"\U0001f4c2 OPENED [{trade.id}]\n"
+            f"\U0001f4c2 [{mode}] OPENED [{trade.id}]{extra}\n"
             f"{trade.question[:65]}\n"
             f"{trade.side} @ {trade.entry_price:.3f}  ${trade.size_usd:.2f}"
         )
 
     async def alert_trade_closed(self, trade, reason: str) -> None:
+        from polybot.config import settings
         emoji = "\u2705" if trade.pnl_usd >= 0 else "\u274c"
+        mode  = "LIVE" if settings.live_trading else "PAPER"
         await self.send(
-            f"{emoji} CLOSED [{trade.id}]  PnL: ${trade.pnl_usd:+.2f} ({trade.pnl_pct:+.1f}%)\n"
+            f"{emoji} [{mode}] CLOSED [{trade.id}]  PnL: ${trade.pnl_usd:+.2f} ({trade.pnl_pct:+.1f}%)\n"
             f"{trade.question[:65]}\n"
             f"{trade.side}  Reason: {reason}"
         )
 
     async def alert_scan_summary(self, scan_n: int, opps: int, exits: int) -> None:
+        from polybot.config import settings
+        mode = "LIVE" if settings.live_trading else "PAPER"
         await self.send(
-            f"\U0001f4ca Scan #{scan_n}  Opened: {opps}  Closed: {exits}"
+            f"\U0001f4ca [{mode}] Scan #{scan_n}  Opened: {opps}  Closed: {exits}"
+        )
+
+    async def alert_live_balance(self, balance: float) -> None:
+        """Send current live USDC.e balance — call after each scan when live."""
+        await self.send(
+            f"\U0001f4b0 LIVE BALANCE: ${balance:.2f} USDC.e"
+        )
+
+    async def alert_daily_cap_hit(self, loss: float) -> None:
+        """Alert when daily loss cap is triggered."""
+        await self.send(
+            f"\u26a0\ufe0f DAILY LOSS CAP HIT\n"
+            f"Loss today: ${loss:.2f}\n"
+            f"Live trading paused until midnight UTC."
         )
 
 

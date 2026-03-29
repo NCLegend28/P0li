@@ -106,6 +106,16 @@ class DashboardState:
     # Live crypto market prices (+ spot / sigma from CoinGecko)
     crypto_feed: list = field(default_factory=list)   # list[dict]
 
+    # ── Sports scanner state ──────────────────────────────────────────────────
+    sports_scan_number:    int           = 0
+    sports_last_scan_at:   datetime | None = None
+    sports_scan_duration:  float          = 0.0
+    sports_next_scan_in:   float          = 0.0
+    sports_matched:        int            = 0    # matched global ↔ US pairs
+    sports_opportunities:  list           = field(default_factory=list)
+    # Each entry: {slug, title, global_price, us_price, edge, confidence, side}
+    sports_feed:           list           = field(default_factory=list)
+
     # History rings for sparklines (last 30 data points)
     scan_duration_history: deque = field(default_factory=lambda: deque(maxlen=30))
     nav_history:           deque = field(default_factory=lambda: deque(maxlen=30))
@@ -116,6 +126,10 @@ class DashboardState:
     daily_pnl:           float = 0.0
     best_edge_today:     float = 0.0
     _stats_date:         date  = field(default_factory=date.today)
+
+    # Live trading
+    live_mode:    bool  = False
+    live_balance: float = 0.0
 
     # Event log
     event_log: deque = field(default_factory=lambda: deque(maxlen=200))
@@ -168,18 +182,20 @@ def _panel_dims(term_w: int, term_h: int) -> dict[str, tuple[int, int]]:
     pos_h    = max(6,  int(main_h * 3 / 5))
     opp_h    = max(6,  main_h - pos_h)
 
-    pnl_h    = max(6,  int(main_h * 3 / 10))
-    closed_h = max(6,  int(main_h * 3 / 10))
-    wxfeed_h = max(6,  main_h - pnl_h - closed_h)
+    pnl_h    = max(5,  int(main_h * 3 / 11))
+    closed_h = max(4,  int(main_h * 2 / 11))
+    sptfeed_h = max(5, int(main_h * 3 / 11))
+    wxfeed_h = max(4,  main_h - pnl_h - sptfeed_h - closed_h)
 
     return {
-        "left":          (cw(left_w),   ch(main_h)),
-        "positions":     (cw(center_w), ch(pos_h)  - 2),   # -2: table header+sep
-        "opportunities": (cw(center_w), ch(opp_h)  - 2),
-        "pnl":           (cw(right_w),  ch(pnl_h)),
-        "wxfeed":        (cw(right_w),  ch(wxfeed_h) - 2),
-        "closed":        (cw(right_w),  ch(closed_h) - 2),
-        "log":           (cw(term_w),   ch(LOG_H)),
+        "left":          (cw(left_w),    ch(main_h)),
+        "positions":     (cw(center_w),  ch(pos_h)  - 2),   # -2: table header+sep
+        "opportunities": (cw(center_w),  ch(opp_h)  - 2),
+        "pnl":           (cw(right_w),   ch(pnl_h)),
+        "sptfeed":       (cw(right_w),   ch(sptfeed_h) - 2),
+        "wxfeed":        (cw(right_w),   ch(wxfeed_h) - 2),
+        "closed":        (cw(right_w),   ch(closed_h) - 2),
+        "log":           (cw(term_w),    ch(LOG_H)),
     }
 
 
@@ -312,6 +328,21 @@ def _scanner_panel(state: DashboardState, w: int, h: int) -> Panel:
         grid.add_row("  CLOSED", f"[{C_BLUE}]{state.daily_trades_closed}[/]")
         if state.best_edge_today > 0:
             grid.add_row("  BEST",   f"[{C_GREEN}]+{state.best_edge_today:.1%}[/]")
+        rows_used += 5
+
+    # Sports scanner stats — shown when sports is enabled and panel has room
+    from polybot.config import settings as cfg
+    if cfg.sports_enabled and h > rows_used + 4:
+        grid.add_row("", "")
+        grid.add_row(f"[{C_TEAL}]SPORTS[/]", "")
+        if state.sports_scan_number:
+            grid.add_row(f"  [{C_DIM}]SCAN #[/]", f"[{C_CYAN}]{state.sports_scan_number}[/]")
+        grid.add_row(f"  [{C_DIM}]MATCHED[/]", f"[{C_WHITE}]{state.sports_matched}[/]")
+        spt_opps = len(state.sports_opportunities)
+        opp_col = C_GREEN if spt_opps > 0 else C_DIM
+        grid.add_row(f"  [{C_DIM}]OPPS[/]", f"[{opp_col}]{spt_opps}[/]")
+        if state.sports_scan_duration:
+            grid.add_row(f"  [{C_DIM}]LAST[/]", f"[{C_DIM}]{state.sports_scan_duration:.1f}s[/]")
 
     return Panel(
         grid,
@@ -501,7 +532,12 @@ def _pnl_panel(state: DashboardState, w: int, h: int) -> Panel:
     g.add_column(style=C_DIM, no_wrap=True)
     g.add_column(justify="right", no_wrap=True)
 
-    g.add_row("BALANCE",   f"[{C_WHITE}]${trader.balance:,.2f}[/]")
+    if state.live_mode:
+        g.add_row(f"[{C_ORANGE}]LIVE USDC[/]", f"[{C_ORANGE}]${state.live_balance:,.2f}[/]")
+        g.add_row(f"[{C_DIM}]──── PAPER ────[/]", "")
+        g.add_row("BALANCE",   f"[{C_WHITE}]${trader.balance:,.2f}[/]")
+    else:
+        g.add_row("BALANCE",   f"[{C_WHITE}]${trader.balance:,.2f}[/]")
     g.add_row("OPEN VAL",  f"[{C_BLUE}]${open_val:,.2f}[/]")
     g.add_row("NAV",       f"[{C_CYAN}]${nav:,.2f}[/]")
     g.add_row("", "")
@@ -580,6 +616,113 @@ def _market_feed_panel(state: DashboardState, w: int, h: int) -> Panel:
     return Panel(t,
                  title=f"[{C_ORANGE}]◈ WX FEED  [{C_DIM}]{len(state.market_feed)}[/][/]",
                  border_style="grey30", style="on grey7", padding=(0, 0))
+
+
+# ─── Panel: SPORTS FEED ──────────────────────────────────────────────────────
+
+def _sports_feed_panel(state: DashboardState, w: int, h: int) -> Panel:
+    """
+    Shows matched global ↔ US market pairs with the cross-platform edge.
+
+    Columns: GAME · GLOBAL · US · EDGE · CONF
+    When sports is disabled or no data yet: shows a one-line status.
+    """
+    from polybot.config import settings as cfg
+
+    max_rows = max(1, h)
+
+    if not cfg.sports_enabled:
+        msg = Align(
+            f"[{C_DIM}]sports disabled — set SPORTS_ENABLED=true[/]",
+            align="center", vertical="middle",
+        )
+        return Panel(msg,
+                     title=f"[{C_TEAL}]◈ SPT FEED[/]",
+                     border_style="grey30", style="on grey7")
+
+    # Header stats row (scan # and last scan time)
+    stats_parts: list[str] = []
+    if state.sports_scan_number:
+        stats_parts.append(f"[{C_DIM}]scan[/] [{C_CYAN}]#{state.sports_scan_number}[/]")
+    if state.sports_matched:
+        stats_parts.append(f"[{C_DIM}]matched[/] [{C_WHITE}]{state.sports_matched}[/]")
+    if state.sports_opportunities:
+        stats_parts.append(f"[{C_YELLOW}]{len(state.sports_opportunities)} opps[/]")
+    if state.sports_scan_duration:
+        stats_parts.append(f"[{C_DIM}]{state.sports_scan_duration:.1f}s[/]")
+    next_s = int(state.sports_next_scan_in)
+    if next_s > 0:
+        stats_parts.append(f"[{C_DIM}]next {next_s}s[/]")
+
+    if not state.sports_feed:
+        content = f"  {'  ·  '.join(stats_parts) if stats_parts else ''}\n" if stats_parts else ""
+        msg = Align(
+            f"{content}[{C_DIM}]waiting for sports scan...[/]",
+            align="center", vertical="middle",
+        )
+        return Panel(msg,
+                     title=f"[{C_TEAL}]◈ SPT FEED  [{C_DIM}]—[/][/]",
+                     border_style="grey30", style="on grey7")
+
+    # Column widths
+    show_conf = w >= 52
+    show_slug = w >= 38
+    fixed_w   = 6 + 6 + 7 + (5 if show_conf else 0)   # GLOBAL + US + EDGE + CONF
+    title_len = max(10, w - fixed_w - (8 if show_slug else 4))
+
+    t = Table(
+        box=box.SIMPLE, show_header=True,
+        header_style=f"bold {C_TEAL}",
+        style="on grey7", expand=True, padding=(0, 1),
+    )
+    t.add_column("GAME",   style=C_WHITE,  no_wrap=True, max_width=title_len)
+    t.add_column("GLOBAL", justify="right", width=6)
+    t.add_column("US",     justify="right", width=6)
+    t.add_column("EDGE",   justify="right", width=7)
+    if show_conf:
+        t.add_column("CONF", justify="right", width=5)
+
+    for pair in state.sports_feed[:max_rows]:
+        g_price = pair.get("global_price", 0.0)
+        u_price = pair.get("us_price",     0.0)
+        edge    = pair.get("edge",          0.0)
+        conf    = pair.get("confidence",    0.7)
+        title   = pair.get("title", pair.get("slug", ""))
+
+        # Edge colour: green = exploitable, yellow = borderline, dim = below threshold
+        if abs(edge) >= 0.07:
+            ec = C_GREEN
+        elif abs(edge) >= 0.04:
+            ec = C_YELLOW
+        else:
+            ec = C_DIM
+
+        # Confidence indicator
+        conf_str = {1.0: f"[{C_GREEN}]●●●[/]", 0.7: f"[{C_YELLOW}]●●○[/]"}.get(
+            conf, f"[{C_RED}]●○○[/]"
+        )
+
+        edge_sign = "+" if edge >= 0 else ""
+        row = [
+            title[:title_len],
+            f"[{C_DIM}]{g_price:.3f}[/]",
+            f"[{C_WHITE}]{u_price:.3f}[/]",
+            f"[{ec}]{edge_sign}{edge:.3f}[/]",
+        ]
+        if show_conf:
+            row.append(conf_str)
+        t.add_row(*row)
+
+    pair_count = len(state.sports_feed)
+    stats_str  = "  ·  ".join(stats_parts)
+    return Panel(
+        t,
+        title=(
+            f"[{C_TEAL}]◈ SPT FEED  [{C_WHITE}]{pair_count}[/][/]"
+            + (f"  [{C_DIM}]{stats_str}[/]" if stats_parts and w > 50 else "")
+        ),
+        border_style="grey30", style="on grey7", padding=(0, 0),
+    )
 
 
 # ─── Panel: CLOSED TRADES ────────────────────────────────────────────────────
@@ -665,8 +808,9 @@ def build_layout() -> Layout:
     )
     root["right"].split_column(
         Layout(name="pnl",     ratio=3),
-        Layout(name="wxfeed",  ratio=4),
-        Layout(name="closed",  ratio=3),
+        Layout(name="sptfeed", ratio=3),
+        Layout(name="wxfeed",  ratio=3),
+        Layout(name="closed",  ratio=2),
     )
     return root
 
@@ -677,13 +821,14 @@ def render(layout: Layout, state: DashboardState) -> None:
     dims   = _panel_dims(tw, th)
 
     layout["header"].update(_header(state))
-    layout["left"].update(_scanner_panel(state,  *dims["left"]))
-    layout["positions"].update(_positions_panel(state,  *dims["positions"]))
-    layout["opportunities"].update(_opportunities_panel(state, *dims["opportunities"]))
-    layout["pnl"].update(_pnl_panel(state,     *dims["pnl"]))
-    layout["wxfeed"].update(_market_feed_panel(state, *dims["wxfeed"]))
-    layout["closed"].update(_closed_panel(state,   *dims["closed"]))
-    layout["log"].update(_log_panel(state,     *dims["log"]))
+    layout["left"].update(_scanner_panel(state,       *dims["left"]))
+    layout["positions"].update(_positions_panel(state,       *dims["positions"]))
+    layout["opportunities"].update(_opportunities_panel(state,    *dims["opportunities"]))
+    layout["pnl"].update(_pnl_panel(state,            *dims["pnl"]))
+    layout["sptfeed"].update(_sports_feed_panel(state, *dims["sptfeed"]))
+    layout["wxfeed"].update(_market_feed_panel(state,  *dims["wxfeed"]))
+    layout["closed"].update(_closed_panel(state,       *dims["closed"]))
+    layout["log"].update(_log_panel(state,             *dims["log"]))
 
 
 # ─── Dashboard class ─────────────────────────────────────────────────────────

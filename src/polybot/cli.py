@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -24,22 +23,70 @@ from polybot.config import settings
 from polybot.paper.trader import PaperTrader
 from polybot.scanner.graph import build_scanner_graph
 from polybot.scanner.state import ScanState
+from polybot.scanner.sports_graph import build_sports_scanner_graph
+from polybot.scanner.sports_state import SportsScanState
 from polybot.telegram.bot import BotState, TelegramAlerter, run_bot_async
 from polybot.ui.dashboard import Dashboard, DashboardState
 from polybot.web.server import run_server, set_dashboard_state
 
 
-# ─── Logging — pipe to file only; terminal output owned by Rich Live ──────────
+# ─── Logging — separate sinks per bot; terminal output owned by Rich Live ─────
+#
+# Three log files, all configurable in .env:
+#   bot.log     — everything (general infrastructure, trader, dashboard)
+#   weather.log — weather strategy, NOAA/Open-Meteo scanner pipeline
+#   sports.log  — sports strategy, US API, Odds API, ESPN pipeline
+#
+# Filter design: bot.log is the catch-all (no filter).
+# Module-specific logs are ADDITIVE — they also appear in bot.log so
+# nothing is lost if a module has an unexpected name.
+#
+# To change paths: set LOG_FILE_PATH / WEATHER_LOG_PATH / SPORTS_LOG_PATH in .env
+
+_WEATHER_MODULES = {"weather", "openmeteo", "noaa", "precipitation", "scanner.graph"}
+_SPORTS_MODULES  = {"sports", "polymarket_us", "odds", "espn", "scanner.sports"}
+
+
+def _is_weather(record) -> bool:
+    return any(mod in record["name"].lower() for mod in _WEATHER_MODULES)
+
+
+def _is_sports(record) -> bool:
+    return any(mod in record["name"].lower() for mod in _SPORTS_MODULES)
+
 
 def _configure_logging() -> None:
     logger.remove()
-    settings.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _fmt = "{time:HH:mm:ss} | {level: <8} | {name} | {message}"
+
+    # Catch-all: everything goes to bot.log
     logger.add(
-        str(settings.log_file_path),
-        level    = settings.log_level,
-        rotation = "10 MB",
-        retention= "7 days",
-        format   = "{time:HH:mm:ss} | {level: <8} | {message}",
+        settings.log_file_path,
+        level     = settings.log_level,
+        rotation  = "10 MB",
+        retention = "7 days",
+        format    = _fmt,
+    )
+
+    # Weather-specific log (weather scanner + strategy only)
+    logger.add(
+        settings.weather_log_path,
+        level     = settings.log_level,
+        rotation  = "10 MB",
+        retention = "7 days",
+        format    = _fmt,
+        filter    = _is_weather,
+    )
+
+    # Sports-specific log (sports scanner, US API, Odds API, ESPN only)
+    logger.add(
+        settings.sports_log_path,
+        level     = settings.log_level,
+        rotation  = "10 MB",
+        retention = "7 days",
+        format    = _fmt,
+        filter    = _is_sports,
     )
 
 
@@ -79,22 +126,11 @@ async def scan_loop(
         dash.log(f"Scan [bold cyan]#{scan_n}[/] started", "INFO")
         t0 = time.monotonic()
 
-        # ── Run pipeline (open positions injected via state) ──────────────────
-        try:
-            result = await graph.ainvoke(
-                ScanState(scan_number=scan_n, open_positions=list(trader.positions.values()))
-            )
-        except Exception as exc:
-            ds.scan_duration = round(time.monotonic() - t0, 1)
-            dash.log(f"Scan [bold cyan]#{scan_n}[/] failed: [red]{exc.__class__.__name__}: {exc}[/] — retrying next interval", "WARN")
-            logger.warning(f"Scan #{scan_n} failed with {exc!r}")
-            sleep_total = settings.scan_interval_seconds
-            elapsed = 0.0
-            while elapsed < sleep_total and not bot_state.stop_event.is_set():
-                ds.next_scan_in = max(0.0, sleep_total - elapsed)
-                await asyncio.sleep(1.0)
-                elapsed += 1.0
-            continue
+        # ── Inject positions, run pipeline ────────────────────────────────────
+        result = await graph.ainvoke(ScanState(
+            scan_number    = scan_n,
+            open_positions = list(trader.positions.values()),
+        ))
 
         ds.scan_duration = round(time.monotonic() - t0, 1)
 
@@ -102,7 +138,6 @@ async def scan_loop(
         exit_signals = _extract(result, "exit_signals",  [])
         filtered     = _extract(result, "filtered_markets", [])
         raw          = _extract(result, "raw_markets", [])
-        coin_cache   = _extract(result, "coin_cache", {})
 
         # ── Update dashboard state from scan results ───────────────────────────
         ds.opportunities    = opps
@@ -115,25 +150,6 @@ async def scan_loop(
         ds.forecasts_fetched= len(set(
             o.notes.split()[0] for o in opps if o.notes
         ))
-
-        # Crypto market feed (with spot + sigma from coin cache)
-        from polybot.api.coingecko import CoinGeckoClient
-        raw_crypto = [m for m in raw if m.category == "crypto"]
-        crypto_feed_items = []
-        for m in raw_crypto:
-            cid  = CoinGeckoClient.coin_id_from_question(m.question)
-            coin = coin_cache.get(cid) if cid else None
-            crypto_feed_items.append({
-                "id":                m.id,
-                "question":          m.question,
-                "yes_price":         m.yes_price,
-                "liquidity_usd":     m.liquidity_usd,
-                "hours_until_close": m.hours_until_close,
-                "spot_usd":          coin.spot_usd if coin else None,
-                "sigma_daily":       CoinGeckoClient.daily_volatility(coin.daily_ohlc) if coin else None,
-                "coin_id":           cid or "",
-            })
-        ds.crypto_feed = crypto_feed_items
 
         # Weather market feed for right panel
         # Build feed from ALL raw weather markets (not just filtered)
@@ -149,7 +165,6 @@ async def scan_loop(
         ]
         extra_markets = []
         if missing_ids:
-            import httpx
             from polybot.api.gamma import GammaClient
             async with GammaClient() as gamma:
                 for mid in missing_ids:
@@ -157,8 +172,8 @@ async def scan_loop(
                         m = await gamma.fetch_market_by_id(mid)
                         if m:
                             extra_markets.append(m)
-                    except (httpx.HTTPStatusError, httpx.RequestError) as e:
-                        logger.warning(f"Could not fetch market {mid} for dashboard: {e}")
+                    except Exception:
+                        pass
 
         ds.market_feed = [
             {
@@ -198,7 +213,7 @@ async def scan_loop(
             if opp_id is None:
                 continue
 
-            closed = await trader.close_position(opp_id, signal.exit_price)
+            closed = trader.close_position(opp_id, signal.exit_price)
             exit_count += 1
             ds.daily_trades_closed += 1
             ds.daily_pnl += closed.pnl_usd
@@ -220,7 +235,7 @@ async def scan_loop(
             if already:
                 continue
 
-            trade = await trader.open_position(opp)
+            trade = trader.open_position(opp)
             if trade:
                 open_count += 1
                 ds.daily_trades_opened += 1
@@ -244,6 +259,15 @@ async def scan_loop(
         if alerter and (open_count > 0 or exit_count > 0):
             await alerter.alert_scan_summary(scan_n, open_count, exit_count)
 
+        # Send live balance after every scan that had activity
+        if alerter and settings.live_trading and trader._clob:
+            balance = trader._clob.get_balance()
+            if open_count > 0 or exit_count > 0:
+                await alerter.alert_live_balance(balance)
+            # Alert if daily cap is close or hit
+            if trader._clob._daily_loss >= settings.max_daily_loss_usd:
+                await alerter.alert_daily_cap_hit(trader._clob._daily_loss)
+
         # ── Countdown sleep ────────────────────────────────────────────────────
         sleep_total = settings.scan_interval_seconds
         elapsed     = 0.0
@@ -256,27 +280,165 @@ async def scan_loop(
     dash.log("Scan loop stopped.", "WARN")
 
 
+# ─── Sports scan loop ─────────────────────────────────────────────────────────
+
+async def sports_scan_loop(
+    trader:    PaperTrader,
+    dash:      Dashboard,
+    ds:        DashboardState,
+    bot_state: BotState,
+    alerter:   TelegramAlerter | None,
+) -> None:
+    """
+    Sports scanner — runs as a separate asyncio task alongside the weather loop.
+
+    Interval: settings.sports_scan_interval_seconds (default 30s).
+    Scans faster than weather (games can tip off quickly) but hits fewer APIs.
+    """
+    graph  = build_sports_scanner_graph()
+    scan_n = 0
+
+    while not bot_state.stop_event.is_set():
+
+        if bot_state.paused:
+            await asyncio.sleep(2)
+            continue
+
+        scan_n += 1
+        t0 = time.monotonic()
+
+        result = await graph.ainvoke(SportsScanState(
+            scan_number    = scan_n,
+            open_positions = list(trader.positions.values()),
+        ))
+
+        duration   = round(time.monotonic() - t0, 1)
+        opps       = _extract(result, "opportunities", [])
+        exits      = _extract(result, "exit_signals",  [])
+        matched    = _extract(result, "matched_pairs", [])
+
+        # ── Update sports dashboard state ──────────────────────────────────────
+        ds.sports_scan_number   = scan_n
+        ds.sports_last_scan_at  = datetime.now(timezone.utc)
+        ds.sports_scan_duration = duration
+        ds.sports_matched       = len(matched)
+        ds.sports_opportunities = opps
+
+        # Build sports feed: all matched pairs sorted by abs(edge), largest first
+        ds.sports_feed = sorted(
+            [
+                {
+                    "slug":         p.us_slug,
+                    "title":        p.us_title or p.global_market.question[:40],
+                    "global_price": p.global_market.yes_price,
+                    "us_price":     p.us_yes_price,
+                    "edge":         round(p.global_market.yes_price - p.us_yes_price, 4),
+                    "confidence":   0.7,   # updated below if opp found
+                }
+                for p in matched
+            ],
+            key=lambda x: abs(x["edge"]),
+            reverse=True,
+        )
+        # Overlay confidence from actual opportunities onto feed rows
+        opp_slugs = {o.us_market_slug: o.confidence for o in opps if o.us_market_slug}
+        for row in ds.sports_feed:
+            if row["slug"] in opp_slugs:
+                row["confidence"] = opp_slugs[row["slug"]]
+
+        if matched or opps:
+            dash.log(
+                f"[SPORTS] #{scan_n} — "
+                f"[cyan]{len(matched)}[/] matched → [yellow]{len(opps)}[/] opps "
+                f"| [dim]{duration}s[/]",
+                "INFO",
+            )
+
+        # ── Execute exits ──────────────────────────────────────────────────────
+        for signal in exits:
+            opp_id = next(
+                (k for k, t in trader.positions.items() if t.id == signal.trade_id),
+                None,
+            )
+            if opp_id is None:
+                continue
+            closed = trader.close_position(opp_id, signal.exit_price)
+            ds.daily_trades_closed += 1
+            ds.daily_pnl += closed.pnl_usd
+            pnl_sign = "+" if closed.pnl_usd >= 0 else ""
+            dash.log(
+                f"[SPORTS EXIT] [magenta]{closed.id}[/] {closed.side} → "
+                f"[{'green' if closed.pnl_usd >= 0 else 'red'}]"
+                f"{pnl_sign}${closed.pnl_usd:.2f}[/]  "
+                f"[dim]{signal.reason}[/]",
+                "EXIT",
+            )
+            if alerter:
+                await alerter.alert_trade_closed(closed, signal.reason)
+
+        # ── Open new sports positions ──────────────────────────────────────────
+        for opp in opps:
+            already = any(t.market_id == opp.market.id for t in trader.positions.values())
+            if already:
+                continue
+            trade = trader.open_position(opp)
+            if trade:
+                ds.daily_trades_opened += 1
+                dash.log(
+                    f"[SPORTS OPEN] [cyan]{trade.id}[/]  "
+                    f"[{'green' if trade.side == 'YES' else 'red'}]{trade.side}[/] "
+                    f"@ [yellow]{trade.entry_price:.3f}[/]  "
+                    f"edge=[cyan]{opp.edge_pct}[/]  "
+                    f"[dim]{opp.market.question[:42]}[/]",
+                    "TRADE",
+                )
+                if alerter:
+                    await alerter.alert_opportunity(opp)
+                    await alerter.alert_trade_opened(trade)
+
+        # ── Countdown sleep ────────────────────────────────────────────────────
+        sleep_total = settings.sports_scan_interval_seconds
+        elapsed     = 0.0
+        while elapsed < sleep_total and not bot_state.stop_event.is_set():
+            ds.sports_next_scan_in = max(0.0, sleep_total - elapsed)
+            await asyncio.sleep(1.0)
+            elapsed += 1.0
+        ds.sports_next_scan_in = 0.0
+
+    dash.log("Sports scan loop stopped.", "WARN")
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 async def main() -> None:
     _configure_logging()
 
+    from pathlib import Path
+    Path("data/trades").mkdir(parents=True, exist_ok=True)
+
     trader    = PaperTrader()
+
+    # ── Live execution — global CLOB ──────────────────────────────────────────
+    if settings.live_trading:
+        from polybot.api.clob_client import ClobClient
+        clob = ClobClient()
+        trader.set_clob_client(clob)
+
+    # ── Live execution — Polymarket US (sports) ────────────────────────────────
+    if settings.live_trading and settings.sports_enabled and settings.polymarket_key_id:
+        from polybot.api.polymarket_us import PolymarketUSClient
+        us_client = PolymarketUSClient(
+            key_id=settings.polymarket_key_id,
+            secret_key=settings.polymarket_secret_key,
+            max_daily_loss=settings.sports_max_daily_loss,
+        )
+        trader.set_us_client(us_client)
+    
     ds        = DashboardState(
         trader        = trader,
         scan_interval = settings.scan_interval_seconds,
     )
     bot_state = BotState(trader=trader)
-
-    # ── Graceful shutdown on SIGTERM / SIGINT ─────────────────────────────────
-    loop = asyncio.get_running_loop()
-
-    def _handle_signal() -> None:
-        logger.warning("Shutdown signal received — stopping scan loop")
-        bot_state.stop_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _handle_signal)
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", settings.telegram_bot_token)
@@ -335,10 +497,23 @@ async def main() -> None:
             dash.run_renderer(), name="renderer"
         ))
 
-        # Main scan loop
+        # Main (weather/politics/crypto) scan loop
         tasks.append(asyncio.create_task(
             scan_loop(trader, dash, ds, bot_state, alerter), name="scanner"
         ))
+
+        # Sports scan loop (separate task, separate log file)
+        if settings.sports_enabled:
+            dash.log(
+                f"Sports scanner enabled — interval=[cyan]{settings.sports_scan_interval_seconds}s[/]  "
+                f"min_edge=[cyan]{settings.sports_min_edge:.0%}[/]  "
+                f"log=[dim]{settings.sports_log_path}[/]",
+                "INFO",
+            )
+            tasks.append(asyncio.create_task(
+                sports_scan_loop(trader, dash, ds, bot_state, alerter),
+                name="sports_scanner",
+            ))
 
         # Only the scanner task stopping should end the bot.
         # Web, telegram, and renderer failures are logged but non-fatal.

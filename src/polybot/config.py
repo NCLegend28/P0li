@@ -1,10 +1,5 @@
-from __future__ import annotations
-
-import warnings
-from pathlib import Path
-
-from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, AliasChoices
 
 
 class Settings(BaseSettings):
@@ -12,100 +7,74 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",   # silently ignore unknown .env fields
     )
 
-    # Polymarket
-    wallet_private_key: str = Field(default="", description="Hot wallet private key")
+    # ── Scanner ───────────────────────────────────────────────────────────────
+    scan_interval_seconds: int   = Field(default=120)
+    min_liquidity_usd:     float = Field(default=500.0)
+    min_edge_threshold:    float = Field(default=0.08)
 
-    # Scanner
-    scan_interval_seconds: int = Field(default=120)
-    min_liquidity_usd: float = Field(default=500.0)
-    min_edge_threshold: float = Field(default=0.08)
-
-    # Paper trading
+    # ── Paper trading ─────────────────────────────────────────────────────────
     paper_starting_balance: float = Field(default=1000.0)
     paper_max_position_usd: float = Field(default=10.0)
-    max_open_positions: int = Field(default=10)
+    max_open_positions:     int   = Field(default=10)
 
-    # Crypto bot
-    crypto_enabled:          bool  = Field(default=True)
-    crypto_min_edge:         float = Field(default=0.10)
-    crypto_max_position_usd: float = Field(default=5.0)
-    crypto_edge_collapse:    float = Field(default=0.02)
+    # ── Live execution ────────────────────────────────────────────────────────
+    live_trading:         bool  = Field(default=False)
+    private_key:          str   = Field(default="", validation_alias=AliasChoices("private_key", "wallet_private_key"))   # hot wallet EOA private key
+    wallet_address:       str   = Field(default="")   # hot wallet EOA address
+    poly_proxy_address:   str   = Field(default="")   # Polymarket proxy wallet (holds USDC)
+    max_daily_loss_usd:   float = Field(default=50.0)
+    poly_key_id:          str   = Field(default="")
+    poly_secret_key:      str   = Field(default="")
+    
+    # Relayer API key (gasless onchain ops — from polymarket.com/settings)
+    relayer_api_key:  str = Field(default="")
+    relayer_address:  str = Field(default="")
 
-    # Web dashboard
+    # CLOB API credentials (order placement — from create_or_derive_api_creds())
+    clob_api_key:        str = Field(default="")
+    clob_api_secret:     str = Field(default="")
+    clob_api_passphrase: str = Field(default="")
+
+    # Legacy field name aliases
+    secret_key:  str = Field(default="")   # some scripts used this
+    passphrase:  str = Field(default="")   # some scripts used this
+
+    # ── Web dashboard ─────────────────────────────────────────────────────────
     web_enabled: bool = Field(default=True)
     web_host:    str  = Field(default="0.0.0.0")
     web_port:    int  = Field(default=8765)
 
-    # Telegram (optional — bot won't start if these are empty)
-    telegram_bot_token: str      = Field(default="")
-    telegram_chat_id:   int      = Field(default=0)
+    # ── Telegram (optional) ───────────────────────────────────────────────────
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id:   int = Field(default=0)
 
-    # Logging
+    # ── Crypto bot ────────────────────────────────────────────────────────────
+    crypto_enabled:  bool  = Field(default=False)
+    crypto_min_edge: float = Field(default=0.10)
+
+    # ── Polymarket US (sports bot) ────────────────────────────────────────────
+    # From polymarket.us/developer — completely separate from global CLOB keys.
+    polymarket_key_id:     str  = Field(default="")
+    polymarket_secret_key: str  = Field(default="")
+    sports_enabled:        bool = Field(default=False)
+    sports_scan_interval_seconds: int = Field(default=30)
+    sports_min_edge:       float = Field(default=0.05)   # 5¢ min for sports
+    sports_max_daily_loss: float = Field(default=50.0)
+
+    # ── The Odds API (sports confirmation — Layer 2) ───────────────────────────
+    odds_api_key: str = Field(default="")
+
+    # ── Paths ─────────────────────────────────────────────────────────────────
+    trade_log_path:   str = Field(default="data/trades/paper_trades.jsonl")
+    log_file_path:    str = Field(default="data/trades/bot.log")
+    weather_log_path: str = Field(default="data/trades/weather.log")
+    sports_log_path:  str = Field(default="data/trades/sports.log")
+
+    # ── Logging ───────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")
-
-    # ── Validators ────────────────────────────────────────────────────────────
-
-    @field_validator("min_edge_threshold")
-    @classmethod
-    def check_min_edge(cls, v: float) -> float:
-        if not (0.0 <= v <= 1.0):
-            raise ValueError(f"min_edge_threshold must be 0.0–1.0, got {v}")
-        return v
-
-    @field_validator("scan_interval_seconds")
-    @classmethod
-    def check_scan_interval(cls, v: int) -> int:
-        if v < 10:
-            raise ValueError(f"scan_interval_seconds must be >= 10, got {v}")
-        return v
-
-    @field_validator("paper_max_position_usd")
-    @classmethod
-    def check_max_position(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError(f"paper_max_position_usd must be > 0, got {v}")
-        return v
-
-    @field_validator("wallet_private_key")
-    @classmethod
-    def warn_if_empty_key(cls, v: str) -> str:
-        if not v:
-            warnings.warn(
-                "wallet_private_key is empty — live trading will not work",
-                stacklevel=2,
-            )
-        return v
-
-    @field_validator("telegram_chat_id")
-    @classmethod
-    def warn_if_zero_chat_id(cls, v: int) -> int:
-        if v == 0:
-            warnings.warn(
-                "telegram_chat_id is 0 — Telegram alerts will be disabled",
-                stacklevel=2,
-            )
-        return v
-
-    # ── Absolute path helpers ─────────────────────────────────────────────────
-
-    @property
-    def project_root(self) -> Path:
-        """Absolute path to the project root (two levels above src/polybot)."""
-        return Path(__file__).resolve().parents[2]
-
-    @property
-    def data_dir(self) -> Path:
-        return self.project_root / "data"
-
-    @property
-    def trade_log_path(self) -> Path:
-        return self.data_dir / "trades" / "paper_trades.jsonl"
-
-    @property
-    def log_file_path(self) -> Path:
-        return self.data_dir / "trades" / "bot.log"
 
 
 settings = Settings()

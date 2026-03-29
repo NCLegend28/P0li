@@ -18,6 +18,8 @@ dependencies = [
     "uvicorn[standard]>=0.34.0,<1.0",
     "fastapi>=0.115.0,<1.0",
     "python-telegram-bot>=21.0,<22.0",
+    "py-clob-client>=0.34.6",
+    "polymarket-us>=0.1.0",
 ]
 
 [project.optional-dependencies]

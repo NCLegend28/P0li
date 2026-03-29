@@ -6,11 +6,11 @@ from enum import Enum
 class StrEnum(str, Enum):
     def __str__(self) -> str:
         return self.value
+
 from typing import Annotated
 import secrets
 from uuid import uuid4
 
-from loguru import logger
 from pydantic import BaseModel, Field, computed_field
 
 
@@ -61,11 +61,7 @@ class Market(BaseModel):
         for o in self.outcomes:
             if o.name.upper() == "YES":
                 return o.price
-        if self.outcomes:
-            logger.debug(f"Market {self.id!r} has no YES outcome; using first outcome price")
-            return self.outcomes[0].price
-        logger.warning(f"Market {self.id!r} has no outcomes — returning 0.0")
-        return 0.0  # filtered out by 0.07 <= yes_price <= 0.93 check
+        return self.outcomes[0].price if self.outcomes else 0.5
 
     @computed_field
     @property
@@ -94,10 +90,23 @@ class Opportunity(BaseModel):
     detected_at:       datetime      = Field(default_factory=lambda: datetime.now(timezone.utc))
     notes:             str           = ""
 
+    # ── Sports / US platform fields ───────────────────────────────────────────
+    us_market_slug: str = ""   # Polymarket US slug (e.g. "lakers-celtics-mar-29")
+    global_price:   float | None = None   # Layer 1 consensus price
+    confidence:     float = 0.7           # 0.5 / 0.7 / 1.0 from sports strategy
+
     @computed_field
     @property
     def edge_pct(self) -> str:
         return f"{self.edge * 100:.1f}%"
+
+    @property
+    def clob_token_id(self) -> str:
+        """Returns the CLOB token ID for the side we're trading (global platform)."""
+        for outcome in self.market.outcomes:
+            if outcome.name.upper() == str(self.side).upper():
+                return outcome.clobTokenId
+        return ""
 
 
 # ─── Paper Trade ──────────────────────────────────────────────────────────────
@@ -116,6 +125,9 @@ class PaperTrade(BaseModel):
     opened_at:        datetime   = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at:        datetime | None = None
     exit_price:       float | None    = None
+    clob_order_id:    str   | None    = None   # live order ID (global CLOB)
+    live_order_id:    str   | None    = None   # live order ID (US platform)
+    live_platform:    str   | None    = None   # "polymarket_us" or "polymarket_global"
 
     @computed_field
     @property

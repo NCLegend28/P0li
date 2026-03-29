@@ -94,21 +94,42 @@ def _serialise(state: "DashboardState") -> dict:
                 "size":     t.size_usd,
                 "opened":   t.opened_at.isoformat() if t.opened_at else "",
                 "openedTs": int(t.opened_at.timestamp()) if t.opened_at else 0,
+                "live":     bool(t.clob_order_id),
+                "platform": t.live_platform or "",
             }
             for t in trader.positions.values()
         ]
 
         closed_data = [
             {
-                "id":     t.id,
-                "side":   str(t.side),
-                "entry":  t.entry_price,
-                "exit":   t.exit_price or 0.0,
-                "pnl":    t.pnl_usd,
-                "reason": "",
+                "id":       t.id,
+                "side":     str(t.side),
+                "entry":    t.entry_price,
+                "exit":     t.exit_price or 0.0,
+                "pnl":      t.pnl_usd,
+                "reason":   "",
+                "live":     bool(t.clob_order_id),
+                "platform": t.live_platform or "",
             }
             for t in reversed(closed)
         ]
+
+        # Live-specific stats (trades that had a real CLOB order placed)
+        live_closed   = [t for t in closed if t.clob_order_id]
+        live_open     = [t for t in trader.positions.values() if t.clob_order_id]
+        live_open_val = sum(t.size_usd for t in live_open)
+        live_nav      = state.live_balance + live_open_val
+        live_pnl      = sum(t.pnl_usd for t in live_closed)
+        live_starting = state.live_balance  # current wallet as reference
+        live_pnl_pct  = (live_pnl / live_starting * 100) if live_starting else 0.0
+        live_wins     = sum(1 for t in live_closed if t.pnl_usd > 0)
+        live_losses   = len(live_closed) - live_wins
+        live_decided  = [t for t in live_closed
+                         if t.exit_price is not None and abs((t.exit_price or 0) - t.entry_price) > 0.001]
+        live_win_rate = (sum(1 for t in live_decided if (t.exit_price or 0) > t.entry_price) / len(live_decided)
+                         if live_decided else 0.0)
+        lw_pnls = [t.pnl_usd for t in live_closed if t.pnl_usd > 0]
+        ll_pnls = [t.pnl_usd for t in live_closed if t.pnl_usd < 0]
 
         trader_data = {
             "balance":  round(trader.balance, 2),
@@ -124,11 +145,32 @@ def _serialise(state: "DashboardState") -> dict:
             "avgWin":   round(avg_win,  2) if avg_win  is not None else None,
             "avgLoss":  round(avg_loss, 2) if avg_loss is not None else None,
         }
+
+        live_stats = {
+            "balance":  round(state.live_balance, 2),
+            "openVal":  round(live_open_val, 2),
+            "nav":      round(live_nav, 2),
+            "totalPnl": round(live_pnl, 2),
+            "pnlPct":   round(live_pnl_pct, 2),
+            "closed":   len(live_closed),
+            "wins":     live_wins,
+            "losses":   live_losses,
+            "winRate":  round(live_win_rate, 4),
+            "openPos":  len(live_open),
+            "avgWin":   round(sum(lw_pnls) / len(lw_pnls), 2) if lw_pnls else None,
+            "avgLoss":  round(sum(ll_pnls) / len(ll_pnls), 2) if ll_pnls else None,
+        }
     else:
         positions_data = []
         closed_data    = []
         trader_data    = {
             "balance": 1000.0, "openVal": 0.0, "nav": 1000.0,
+            "totalPnl": 0.0, "pnlPct": 0.0,
+            "closed": 0, "wins": 0, "losses": 0, "winRate": 0.0,
+            "openPos": 0, "avgWin": None, "avgLoss": None,
+        }
+        live_stats = {
+            "balance": 0.0, "openVal": 0.0, "nav": 0.0,
             "totalPnl": 0.0, "pnlPct": 0.0,
             "closed": 0, "wins": 0, "losses": 0, "winRate": 0.0,
             "openPos": 0, "avgWin": None, "avgLoss": None,
@@ -196,6 +238,39 @@ def _serialise(state: "DashboardState") -> dict:
         "opps":         opps_data,
         "closed":       closed_data,
         "trader":       trader_data,
+        "liveStats":    live_stats,
+        "liveMode":     state.live_mode,
+        # ── Sports ──────────────────────────────────────────────────────────
+        "sportsEnabled":  settings.sports_enabled,
+        "sptScanNum":     state.sports_scan_number,
+        "sptLastScan":    (state.sports_last_scan_at.strftime("%H:%M:%S")
+                           if state.sports_last_scan_at else "—"),
+        "sptDuration":    round(state.sports_scan_duration, 1),
+        "sptNextIn":      int(state.sports_next_scan_in),
+        "sptMatched":     state.sports_matched,
+        "sptFeed":        [
+            {
+                "slug":        row.get("slug", ""),
+                "title":       row.get("title", ""),
+                "globalPrice": round(row.get("global_price", 0), 4),
+                "usPrice":     round(row.get("us_price", 0), 4),
+                "edge":        round(row.get("edge", 0), 4),
+                "confidence":  row.get("confidence", 0.7),
+            }
+            for row in state.sports_feed
+        ],
+        "sptOpps":        [
+            {
+                "q":        o.market.question,
+                "slug":     o.us_market_slug,
+                "side":     str(o.side),
+                "globalPx": round(o.global_price or 0, 4),
+                "usPx":     round(o.market_price, 4),
+                "edge":     round(o.edge, 4),
+                "conf":     round(o.confidence, 1),
+            }
+            for o in state.sports_opportunities
+        ],
         "events":       events,
         "maxPositions": settings.max_open_positions,
     }
@@ -390,7 +465,7 @@ const TIPS={
   balance:['BALANCE','Cash not currently deployed in any open position.'],
   openVal:['OPEN VALUE','Total cost basis of all currently open positions combined.'],
   nav:['NET ASSET VALUE','Balance + mark-to-market value of all open positions.'],
-  totalPnl:['TOTAL P&L','Cumulative profit/loss vs the starting paper balance.'],
+  totalPnl:['TOTAL P&L','Cumulative profit/loss vs starting balance.'],
   closed:['CLOSED TRADES','Total number of positions that have been fully exited.'],
   winRate:['WIN RATE','Percentage of closed trades where exit price exceeded entry price.'],
   openPos:max=>[`OPEN POSITIONS`,`Active positions. Bot stops opening new ones after ${max} (circuit breaker).`],
@@ -422,6 +497,12 @@ const TIPS={
   navHist:['NAV HISTORY','Net Asset Value trend across the last 20 scan cycles. Green = growing.'],
   spot:['SPOT PRICE','Current CoinGecko spot price in USD. Cached for 60 seconds.'],
   sigma:['DAILY VOL (σ)','30-day rolling daily volatility from log returns of closing prices.'],
+  globalPx:['GLOBAL PRICE','Smart money consensus price from the global Polymarket platform (~$700M volume).'],
+  usPx:['US PRICE','Current price on Polymarket US — the execution target where we trade.'],
+  edgeSpt:['SPORTS EDGE','Global price minus US price. Positive = YES is underpriced on US. Threshold: ≥5¢ or ≥3¢ with all layers confirming.'],
+  confSpt:['CONFIDENCE','1.0 = all 3 layers agree (global + sportsbooks + edge). 0.7 = Layer 1 alone. 0.5 = conflicting signals.'],
+  sptMatched:['MATCHED PAIRS','Games found on both global Polymarket and US Polymarket. The edge is computed from the price gap between them.'],
+  sptScan:['SPORTS SCAN','Sports scanner runs every 30s (faster than weather). Separate asyncio task with its own log file.'],
 };
 
 // Tooltip
@@ -445,7 +526,7 @@ document.addEventListener('mouseleave',()=>{tip.style.display='none';});
 // ── Zone layout (persisted to localStorage) ───────────────────────────────────
 // Zones are fixed grid slots. Modules are draggable content cards.
 // Dragging a module header swaps two modules between zones.
-const DEFAULT_LAYOUT={left:'scanner',ct:'positions',cb:'opportunities',rt:'pnl',rm:'wxfeed',rb:'closed'};
+const DEFAULT_LAYOUT={left:'scanner',ct:'positions',cb:'opportunities',rt:'pnl',rm:'sptfeed',rb:'closed'};
 let layout=JSON.parse(localStorage.getItem('pb-zones')||'null')||{...DEFAULT_LAYOUT};
 
 const MOD_META={
@@ -454,6 +535,7 @@ const MOD_META={
   opportunities:{col:'#ffd166',title:'OPPORTUNITIES'},
   pnl:          {col:'#c77dff',title:'P&L METRICS'},
   wxfeed:       {col:'#ff9a3c',title:'WX FEED'},
+  sptfeed:      {col:'#00e5ff',title:'SPT FEED'},
   closed:       {col:'#58a6ff',title:'CLOSED'},
 };
 
@@ -537,13 +619,32 @@ function condenseCrypto(q){
   return coin+' · '+q.slice(0,35);
 }
 
-// ── Tab ───────────────────────────────────────────────────────────────────────
-let currentPage='wx';
-function showPage(p){
-  currentPage=p;
-  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.page===p));
+function condenseGame(q){
+  // "Will the Lakers beat the Celtics on Mar 29?" → "Lakers vs Celtics"
+  const m=q.match(/will (?:the )?(.+?) (?:beat|defeat|win against|vs[.]?) (?:the )?(.+?)(?:\s+on\s+|\s+in\s+|\?)/i);
+  if(m)return m[1].trim().replace(/^Los Angeles /,'LA ').replace(/^Golden State /,'GS ')+' vs '+m[2].trim().replace(/^Los Angeles /,'LA ').replace(/^Golden State /,'GS ');
+  return q.replace(/^will\s+(?:the\s+)?/i,'').replace(/\?.*$/,'').slice(0,42);
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+// account: 'paper' | 'live'   (top-level — which account to view)
+// market:  'wx' | 'crypto'    (sub-filter within paper view)
+let currentAccount=localStorage.getItem('pb-account')||'paper';
+let currentMarket =localStorage.getItem('pb-market') ||'wx';
+
+function showAccount(a){
+  currentAccount=a;
+  localStorage.setItem('pb-account',a);
   if(lastData)fullRender(lastData);
 }
+function showMarket(m){
+  currentMarket=m;
+  localStorage.setItem('pb-market',m);
+  if(lastData)fullRender(lastData);
+}
+
+// Convenience: is the view showing live data?
+function isLive(){return currentAccount==='live';}
 
 // ── Module content builders (return HTML for .mb) ─────────────────────────────
 
@@ -570,13 +671,26 @@ function modScanner(S){
     ${kv('dailyPnl','P&L',`<span style="color:${pc(dailyPnl)}">${dailyPnl>=0?'&#9650;':'&#9660;'} $${dailyPnl>=0?'+':''}${(dailyPnl||0).toFixed(2)}</span>`)}
     ${kv('openPos','OPENED',`<span style="color:${C.cyan}">${dailyOpened}</span>`)}
     ${kv('closed','CLOSED',`<span style="color:${C.blue}">${dailyClosed}</span>`)}
-    ${kv('bestEdge','BEST EDGE',`<span style="color:${C.green}">+${((bestEdge||0)*100).toFixed(1)}%</span>`)}`;
+    ${kv('bestEdge','BEST EDGE',`<span style="color:${C.green}">+${((bestEdge||0)*100).toFixed(1)}%</span>`)}
+    ${currentMarket==='spt'&&S.sportsEnabled?`
+    <div class="sep"></div>
+    <div style="color:#00e5ff;font-size:9px;margin-bottom:3px">SPORTS SCANNER</div>
+    ${kv('sptScan','SCAN #',`<span style="color:${C.cyan}">${S.sptScanNum||0}</span>`)}
+    ${kv('sptMatched','MATCHED',`<span style="color:${C.white}">${S.sptMatched||0}</span>`)}
+    ${kv('sptScan','OPPS',`<span style="color:${(S.sptOpps||[]).length>0?C.yellow:C.dim}">${(S.sptOpps||[]).length}</span>`)}
+    ${kv('sptScan','LAST',`<span style="color:${C.dim}">${S.sptLastScan||'—'}</span>`)}
+    ${kv('sptScan','DURATION',`<span style="color:${C.dim}">${S.sptDuration||0}s</span>`)}
+    `:''}`;
 }
 
 function modPositions(S,fm){
-  const isCrypto=currentPage==='crypto';
-  const positions=(S.positions||[]).filter(p=>isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q));
-  const cf=isCrypto?condenseCrypto:condense;
+  const isCrypto=currentMarket==='crypto';
+  let positions=S.positions||[];
+  const isSpt=currentMarket==='spt';
+  if(isLive()) positions=positions.filter(p=>p.live);
+  else if(isSpt) positions=positions.filter(p=>p.platform==='polymarket_us');
+  else positions=positions.filter(p=>isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q));
+  const cf=isSpt?condenseGame:isCrypto?condenseCrypto:condense;
   if(!positions.length)return`<div style="color:${C.dim};text-align:center;padding:20px 0">no open positions</div>`;
   const hdr=`<div style="display:grid;grid-template-columns:90px 1fr 42px 54px 54px 84px 46px;gap:0 6px;margin-bottom:4px">
     ${[['ID','scanNum'],['MARKET','market'],['SIDE','side'],['ENTRY','entry'],['NOW','now'],['UNREAL','unreal'],['AGE','hrs']].map(([h,id])=>`<span class="gh" data-tip="${id}">${h}</span>`).join('')}
@@ -599,7 +713,31 @@ function modPositions(S,fm){
 }
 
 function modOpportunities(S){
-  const isCrypto=currentPage==='crypto';
+  const isCrypto=currentMarket==='crypto';
+  const isSpt=currentMarket==='spt';
+
+  if(isSpt){
+    const opps=S.sptOpps||[];
+    if(!opps.length)return`<div style="color:${C.dim};text-align:center;padding:12px 0">scanning for sports edges...</div>`;
+    const hdr=`<div style="display:grid;grid-template-columns:1fr 42px 58px 58px 62px 44px;gap:0 6px;margin-bottom:4px">
+      ${[['GAME','market'],['SIDE','side'],['GLOBAL','globalPx'],['US','usPx'],['EDGE','edgeSpt'],['CONF','confSpt']].map(([h,id],i)=>`<span class="gh" data-tip="${id}" style="text-align:${i>0?'right':'left'}">${h}</span>`).join('')}
+    </div><div style="border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:3px"></div>`;
+    const rows=opps.map(o=>{
+      const e=o.edge||0,ec2=e>=0.12?C.green:e>=0.05?C.yellow:C.muted;
+      const conf=o.conf||0.7;
+      const confDots=conf>=1.0?`<span style="color:${C.green}">●●●</span>`:conf>=0.7?`<span style="color:${C.yellow}">●●<span style="color:${C.dim}">○</span></span>`:`<span style="color:${C.red}">●<span style="color:${C.dim}">○○</span></span>`;
+      return`<div style="display:grid;grid-template-columns:1fr 42px 58px 58px 62px 44px;gap:0 6px" class="gr">
+        <span style="color:${C.text}" class="oc" title="${o.q}">${condenseGame(o.q)}</span>
+        <span style="color:${o.side==='YES'?C.green:C.red};text-align:center">${t('side',o.side)}</span>
+        <span style="color:${C.dim};text-align:right">${t('globalPx',(o.globalPx||0).toFixed(3))}</span>
+        <span style="color:${C.white};text-align:right">${t('usPx',(o.usPx||0).toFixed(3))}</span>
+        <span style="color:${ec2};text-align:right;font-weight:700">+${(e*100).toFixed(1)}%</span>
+        <span style="text-align:right">${t('confSpt',confDots)}</span>
+      </div>`;
+    }).join('');
+    return hdr+rows;
+  }
+
   const opps=(S.opps||[]).filter(o=>isCrypto?o.strat!=='WX':o.strat==='WX');
   const cf=isCrypto?condenseCrypto:condense;
   if(!opps.length)return`<div style="color:${C.dim};text-align:center;padding:12px 0">scanning...</div>`;
@@ -619,25 +757,29 @@ function modOpportunities(S){
 }
 
 function modPnl(S){
-  const tr=S.trader||{},nav=S.navHistory||[];
+  const tr=isLive()?(S.liveStats||{}):(S.trader||{});
+  const nav=isLive()?[]:(S.navHistory||[]);
+  const balLabel=isLive()?'USDC BAL':'BALANCE';
+  const pnlLabel=isLive()?'LIVE P&L':'TOTAL P&L';
   return`
-    ${kv('balance','BALANCE',`$${(tr.balance||0).toFixed(2)}`)}
+    ${kv('balance',balLabel,`$${(tr.balance||0).toFixed(2)}`)}
     ${kv('openVal','OPEN VAL',`<span style="color:${C.blue}">$${(tr.openVal||0).toFixed(2)}</span>`)}
     ${kv('nav','NAV',`<span style="color:${C.cyan}">$${(tr.nav||0).toFixed(2)}</span>`)}
     <div class="sep"></div>
-    ${kv('totalPnl','TOTAL P&L',`<span style="color:${pc(tr.totalPnl||0)}">${(tr.totalPnl||0)>=0?'&#9650;':'&#9660;'} $${(tr.totalPnl||0)>=0?'+':''}${(tr.totalPnl||0).toFixed(2)} (${(tr.pnlPct||0)>=0?'+':''}${(tr.pnlPct||0).toFixed(2)}%)</span>`)}
-    <div style="margin:3px 0">${t('navHist',`<span style="color:${(tr.totalPnl||0)>=0?C.green:C.red};font-size:11px">${spark(nav)}</span>`)}</div>
+    ${kv('totalPnl',pnlLabel,`<span style="color:${pc(tr.totalPnl||0)}">${(tr.totalPnl||0)>=0?'&#9650;':'&#9660;'} $${(tr.totalPnl||0)>=0?'+':''}${(tr.totalPnl||0).toFixed(2)} (${(tr.pnlPct||0)>=0?'+':''}${(tr.pnlPct||0).toFixed(2)}%)</span>`)}
+    ${nav.length?`<div style="margin:3px 0">${t('navHist',`<span style="color:${(tr.totalPnl||0)>=0?C.green:C.red};font-size:11px">${spark(nav)}</span>`)}</div>`:''}
     <div class="sep"></div>
     ${kv('closed','CLOSED',`${tr.closed||0} <span style="color:${C.green}">&#10003;${tr.wins||0}</span> <span style="color:${C.red}">&#10007;${tr.losses||0}</span>`)}
     ${kv('winRate','WIN RATE',`<span style="color:${(tr.winRate||0)>=.55?C.green:(tr.winRate||0)>=.45?C.yellow:C.red}">${((tr.winRate||0)*100).toFixed(0)}%</span>`)}
     ${kv('openPos','OPEN POS',`<span style="color:${C.cyan}">${tr.openPos||0}</span><span style="color:${C.dim}">/${S.maxPositions||10}</span>`)}
     ${tr.avgWin!=null?kv('avgWin','AVG WIN',`<span style="color:${C.green}">$+${tr.avgWin.toFixed(2)}</span>`):''}
     ${tr.avgLoss!=null?kv('avgLoss','AVG LOSS',`<span style="color:${C.red}">$${tr.avgLoss.toFixed(2)}</span>`):''}
-    ${kv('kelly','KELLY',`<span style="color:${C.yellow}">~25% <span style="color:${C.dim}">(¼ kelly)</span></span>`)}`;
+    ${!isLive()?kv('kelly','KELLY',`<span style="color:${C.yellow}">~25% <span style="color:${C.dim}">(¼ kelly)</span></span>`):''}`;
 }
 
 function modWxfeed(S){
-  const isCrypto=currentPage==='crypto';
+  if(currentMarket==='spt') return modSptfeed(S);
+  const isCrypto=currentMarket==='crypto';
   const feed=isCrypto?(S.cryptoFeed||[]):(S.feed||[]);
   const cf=isCrypto?condenseCrypto:condense;
   if(!feed.length)return`<div style="color:${C.dim};text-align:center;padding:12px 0">fetching...</div>`;
@@ -686,8 +828,50 @@ function modWxfeed(S){
   return prefix+hdr+rows;
 }
 
+function modSptfeed(S){
+  if(!S.sportsEnabled){
+    return`<div style="color:${C.dim};text-align:center;padding:20px 0">sports disabled<br><span style="font-size:9px">set SPORTS_ENABLED=true in .env</span></div>`;
+  }
+  // Stats row
+  const statsHtml=`<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px;font-size:9px">
+    <span>${t('sptScan','SCAN')}&nbsp;<span style="color:${C.cyan}">#${S.sptScanNum||0}</span></span>
+    <span>${t('sptMatched','MATCHED')}&nbsp;<span style="color:${C.white}">${S.sptMatched||0}</span></span>
+    <span style="color:${(S.sptOpps||[]).length>0?C.yellow:C.dim}">${(S.sptOpps||[]).length}&nbsp;OPPS</span>
+    ${S.sptDuration?`<span style="color:${C.dim}">${S.sptDuration}s</span>`:''}
+    ${(S.sptNextIn||0)>0?`<span style="color:${C.dim}">next&nbsp;<span id="hsptcnt2" style="color:${C.cyan}">${S.sptNextIn}</span>s</span>`:''}
+  </div>`;
+
+  const feed=S.sptFeed||[];
+  if(!feed.length){
+    return statsHtml+`<div style="color:${C.dim};text-align:center;padding:12px 0">waiting for sports scan...</div>`;
+  }
+
+  const hdr=`<div style="display:grid;grid-template-columns:1fr 52px 52px 62px 44px;gap:0 5px;margin-bottom:4px">
+    ${[['GAME','market'],['GLOBAL','globalPx'],['US','usPx'],['EDGE','edgeSpt'],['CONF','confSpt']].map(([h,id],i)=>`<span class="gh" data-tip="${id}" style="text-align:${i?'right':'left'}">${h}</span>`).join('')}
+  </div><div style="border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:3px"></div>`;
+
+  const rows=feed.map(p=>{
+    const e=p.edge||0,g=p.globalPrice||0,u=p.usPrice||0;
+    const ec2=Math.abs(e)>=0.07?C.green:Math.abs(e)>=0.04?C.yellow:C.dim;
+    const eSgn=e>=0?'+':'';
+    const conf=p.confidence||0.7;
+    const confDots=conf>=1.0?`<span style="color:${C.green}">●●●</span>`:conf>=0.7?`<span style="color:${C.yellow}">●●<span style="color:${C.dim}">○</span></span>`:`<span style="color:${C.red}">●<span style="color:${C.dim}">○○</span></span>`;
+    // Highlight rows with actionable edge
+    const rowBg=Math.abs(e)>=0.05?'background:rgba(0,229,255,.04);border-radius:2px;':'';
+    return`<div style="display:grid;grid-template-columns:1fr 52px 52px 62px 44px;gap:0 5px;${rowBg}" class="gr">
+      <span style="color:${C.text}" class="oc" title="${p.title}">${condenseGame(p.title||p.slug||'')}</span>
+      <span style="color:${C.dim};text-align:right">${t('globalPx',g.toFixed(3))}</span>
+      <span style="color:${C.white};text-align:right">${t('usPx',u.toFixed(3))}</span>
+      <span style="color:${ec2};text-align:right;font-weight:${Math.abs(e)>=0.05?700:400}">${t('edgeSpt',eSgn+e.toFixed(3))}</span>
+      <span style="text-align:right">${t('confSpt',confDots)}</span>
+    </div>`;
+  }).join('');
+  return statsHtml+hdr+rows;
+}
+
 function modClosed(S){
-  const closed=S.closed||[];
+  let closed=S.closed||[];
+  if(isLive()) closed=closed.filter(t=>t.live);
   if(!closed.length)return`<div style="color:${C.dim};text-align:center;padding:16px 0">no closed trades</div>`;
   const hdr=`<div style="display:grid;grid-template-columns:90px 40px 52px 52px 1fr;gap:0 5px;margin-bottom:4px">
     ${[['ID','scanNum'],['SIDE','side'],['IN','entry'],['OUT','now'],['P&L','totalPnl']].map(([h,id],i)=>`<span class="gh" data-tip="${id}" style="text-align:${i>1?'right':'left'}">${h}</span>`).join('')}
@@ -712,15 +896,19 @@ function renderZone(zoneId,S,fm){
   if(!el)return;
 
   // Count badge
+  const isCrypto=currentMarket==='crypto';
   const counts={
-    positions:(S.positions||[]).filter(p=>currentPage==='crypto'?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q)).length,
-    opportunities:(S.opps||[]).filter(o=>currentPage==='crypto'?o.strat!=='WX':o.strat==='WX').length,
-    wxfeed:currentPage==='crypto'?(S.cryptoFeed||[]).length:(S.feed||[]).length,
-    closed:(S.closed||[]).length,
+    positions:isLive()
+      ?(S.positions||[]).filter(p=>p.live).length
+      :(S.positions||[]).filter(p=>isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q)).length,
+    opportunities:(S.opps||[]).filter(o=>isCrypto?o.strat!=='WX':o.strat==='WX').length,
+    wxfeed:isCrypto?(S.cryptoFeed||[]).length:(S.feed||[]).length,
+    sptfeed:(S.sptFeed||[]).length,
+    closed:isLive()?(S.closed||[]).filter(t=>t.live).length:(S.closed||[]).length,
   };
   const cnt=counts[modId]!=null?`&nbsp;<span style="color:${C.white}">${counts[modId]}</span>`:'';
 
-  const BUILDERS={scanner:()=>modScanner(S),positions:()=>modPositions(S,fm),opportunities:()=>modOpportunities(S),pnl:()=>modPnl(S),wxfeed:()=>modWxfeed(S),closed:()=>modClosed(S)};
+  const BUILDERS={scanner:()=>modScanner(S),positions:()=>modPositions(S,fm),opportunities:()=>modOpportunities(S),pnl:()=>modPnl(S),wxfeed:()=>modWxfeed(S),sptfeed:()=>modSptfeed(S),closed:()=>modClosed(S)};
   const body=BUILDERS[modId]?BUILDERS[modId]():'';
 
   el.innerHTML=`<div class="module">
@@ -748,11 +936,17 @@ function fullRender(S){
       scan&nbsp;<span style="color:${C.cyan}">#${S.scanNum}</span>
       &nbsp;&#183;&nbsp;next in&nbsp;<span id="hcountdown" style="color:${C.cyan}">${S.nextScanIn}</span>s
       &nbsp;&#183;&nbsp;last&nbsp;<span style="color:${C.yellow}">${lastDur}s</span>
+      ${S.sportsEnabled&&currentMarket==='spt'?`&nbsp;&#183;&nbsp;<span style="color:#00e5ff">SPT</span>&nbsp;scan&nbsp;<span style="color:${C.cyan}">#${S.sptScanNum}</span>&nbsp;next&nbsp;<span id="hsptcountdown" style="color:${C.cyan}">${S.sptNextIn}</span>s`:''}
     </span>
     <div style="display:flex;gap:5px;margin-left:8px">
-      <button class="tab${currentPage==='wx'?' active':''}" data-page="wx" onclick="showPage('wx')">&#9672; WEATHER</button>
-      <button class="tab${currentPage==='crypto'?' active':''}" data-page="crypto" onclick="showPage('crypto')">&#9672; CRYPTO</button>
+      <button class="tab${currentAccount==='paper'?' active':''}" onclick="showAccount('paper')">&#9672; PAPER</button>
+      ${S.liveMode?`<button class="tab${currentAccount==='live'?' active':''}" style="${currentAccount==='live'?'':'color:#ff9a3c;border-color:rgba(255,154,60,.35)'}" onclick="showAccount('live')">&#9672; LIVE</button>`:''}
     </div>
+    ${currentAccount==='paper'?`<div style="display:flex;gap:4px;margin-left:4px">
+      <button class="tab${currentMarket==='wx'?' active':''}" onclick="showMarket('wx')" style="font-size:9px;padding:2px 7px">WX</button>
+      <button class="tab${currentMarket==='crypto'?' active':''}" onclick="showMarket('crypto')" style="font-size:9px;padding:2px 7px">CRYPTO</button>
+      ${S.sportsEnabled?`<button class="tab${currentMarket==='spt'?' active':''}" onclick="showMarket('spt')" style="font-size:9px;padding:2px 7px;${currentMarket==='spt'?'':'color:#00e5ff;border-color:rgba(0,229,255,.35)'}">SPT</button>`:''}
+    </div>`:''}
     <span style="margin-left:auto;color:${C.dim}">&#9201;&nbsp;<span id="hclock" style="color:${C.white}">${fmtNow()}</span></span>`;
 
   // Zones
@@ -777,11 +971,13 @@ function fullRender(S){
 
 // ── Tick update (clock + countdown only — no full re-render) ──────────────────
 let pulse=true;
-function tickUpdate(nextScanIn){
+function tickUpdate(nextScanIn,sptNextIn){
   pulse=!pulse;
   const hp=document.getElementById('hpulse');if(hp)hp.textContent=(pulse?'● ':'○ ')+'SCANNING';
   const hcd=document.getElementById('hcountdown');if(hcd)hcd.textContent=nextScanIn;
   const hck=document.getElementById('hclock');if(hck)hck.textContent=fmtNow();
+  const hsp=document.getElementById('hsptcountdown');if(hsp)hsp.textContent=Math.max(0,(sptNextIn||0));
+  const hsp2=document.getElementById('hsptcnt2');if(hsp2)hsp2.textContent=Math.max(0,(sptNextIn||0));
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -793,7 +989,7 @@ function onMessage(S){
   lastMsgAt=Date.now();
   if(lastScanNum!==S.scanNum){lastScanNum=S.scanNum;fullRender(S);}
   lastData=S;
-  tickUpdate(S.nextScanIn);
+  tickUpdate(S.nextScanIn,S.sptNextIn);
 }
 
 function connect(){
@@ -804,7 +1000,7 @@ function connect(){
     conn.innerHTML='<span style="color:#3ddc84">&#9899; live</span>';
     clearTimeout(reconnectTimer);
     tickTimer=setInterval(()=>{
-      if(lastData)tickUpdate(lastData.nextScanIn>0?lastData.nextScanIn-1:0);
+      if(lastData)tickUpdate(lastData.nextScanIn>0?lastData.nextScanIn-1:0,lastData.sptNextIn>0?lastData.sptNextIn-1:0);
       const lag=Date.now()-lastMsgAt;
       if(lag>5000)conn.innerHTML=`<span style="color:#ffd166">&#9899; stale ${(lag/1000).toFixed(0)}s</span>`;
       else conn.innerHTML='<span style="color:#3ddc84">&#9899; live</span>';

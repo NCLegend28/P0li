@@ -27,7 +27,52 @@ _WEATHER_KEYWORDS = (
 )
 _CRYPTO_KEYWORDS  = ("bitcoin", "btc", "ethereum", "eth", "crypto", "sol ", "xrp")
 _POLITICS_KEYWORDS = ("election", "president", "senate", "congress", "vote", "trump", "biden")
-_SPORTS_KEYWORDS  = ("nba", "nfl", "mlb", "nhl", "soccer", "mls", "epl", "ufc")
+
+# League acronyms + common team/sport terms.
+# Team-name-only questions ("Will the Lakers beat…") lack acronyms but
+# usually include the team name or venue in one of these lists.
+_SPORTS_KEYWORDS  = (
+    # League acronyms
+    "nba", "nfl", "mlb", "nhl", "mls", "epl", "ufc", "wnba",
+    "premier league", "champions league", "la liga", "serie a",
+    "bundesliga", "ligue 1", "ncaa", "march madness",
+    # Game types
+    " game ", " match ", " series ", "playoff", "championship",
+    "super bowl", "world series", "stanley cup", "nba finals",
+    "world cup", "euro ", " cup ",
+    # NBA teams (enough to catch most matchup questions)
+    "lakers", "celtics", "warriors", "bulls", "heat", "nets",
+    "knicks", "bucks", "sixers", "suns", "nuggets", "clippers",
+    "raptors", "mavs", "mavericks", "rockets", "spurs", "thunder",
+    "blazers", "jazz", "kings", "pistons", "cavs", "cavaliers",
+    "hawks", "hornets", "magic", "pacers", "grizzlies", "pelicans",
+    "wizards", "timberwolves", "wolves",
+    # NFL teams
+    "patriots", "chiefs", "cowboys", "packers", "eagles", "steelers",
+    "ravens", "niners", "49ers", "broncos", "seahawks", "rams",
+    "chargers", "raiders", "dolphins", "bills", "colts", "texans",
+    "jaguars", "titans", "bengals", "browns", "giants", "commanders",
+    "falcons", "panthers", "saints", "buccaneers", "cardinals", "bears",
+    "lions", "vikings",
+    # MLB teams
+    "yankees", "red sox", "dodgers", "cubs", "mets", "braves",
+    "astros", "padres", "phillies", "cardinals", "giants", "athletics",
+    # NHL teams
+    "maple leafs", "canadiens", "bruins", "rangers", "blackhawks",
+    "penguins", "flyers", "capitals", "avalanche", "oilers", "canucks",
+    # Soccer / other
+    "liverpool", "manchester", "arsenal", "chelsea", "barcelona",
+    "real madrid", "bayern", "psg", "juventus",
+    # Generic sports verbs that rarely appear outside sports questions
+    " win the ", "beat the ", "cover the spread",
+)
+
+
+_SPORTS_TAG_SLUGS = {
+    "sports", "nba", "nfl", "mlb", "nhl", "soccer", "tennis", "golf",
+    "mma", "ufc", "boxing", "formula-1", "f1", "esports", "cricket",
+    "rugby", "olympics", "ncaa",
+}
 
 
 def _parse_category(tags: list[dict], question: str = "") -> MarketCategory:
@@ -40,6 +85,11 @@ def _parse_category(tags: list[dict], question: str = "") -> MarketCategory:
         return MarketCategory.POLITICS
     if any(kw in q for kw in _SPORTS_KEYWORDS):
         return MarketCategory.SPORTS
+    # Fall back to tag slugs if question text didn't match
+    for tag in tags:
+        slug = tag.get("slug", tag.get("label", "")).lower()
+        if slug in _SPORTS_TAG_SLUGS:
+            return MarketCategory.SPORTS
     return MarketCategory.OTHER
 
 

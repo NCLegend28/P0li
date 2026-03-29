@@ -15,9 +15,9 @@ Responsibilities:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from loguru import logger
 from rich.console import Console
@@ -27,19 +27,41 @@ from rich import box
 from polybot.config import settings
 from polybot.models import Opportunity, PaperTrade, Side, TradeStatus
 
-TRADE_LOG_PATH = settings.trade_log_path
+TRADE_LOG_PATH = Path("data/trades/paper_trades.jsonl")
 console = Console()
 
 
 class PaperTrader:
     def __init__(self):
-        self._lock = asyncio.Lock()
         self.balance:      float             = settings.paper_starting_balance
         self.positions:    dict[str, PaperTrade] = {}   # opportunity_id → trade
         self.closed_trades: list[PaperTrade] = []
+        self._clob    = None   # global CLOB client — set by cli.py when LIVE_TRADING=true
+        self._us_clob = None   # US platform client — set by cli.py when US keys configured
 
         TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._load_history()
+
+    @property
+    def live_mode(self) -> bool:
+        """True when live trading is enabled and global CLOB client is wired in."""
+        return settings.live_trading and self._clob is not None
+
+    @property
+    def us_live_mode(self) -> bool:
+        """True when live trading is enabled and US platform client is wired in."""
+        return settings.live_trading and self._us_clob is not None
+
+    def set_clob_client(self, clob) -> None:
+        """Wire in the global CLOB client. Called by cli.py at startup."""
+        self._clob = clob
+        logger.info(f"Live trading enabled (global) — balance=${clob.get_balance():.2f}")
+
+    def set_us_client(self, us_client) -> None:
+        """Wire in the Polymarket US client. Called by cli.py at startup."""
+        self._us_clob = us_client
+        bal = us_client.get_balance()
+        logger.info("Live trading enabled (US platform) — balance={}", bal)
 
     # ─── State persistence ────────────────────────────────────────────────────
 
@@ -75,65 +97,128 @@ class PaperTrader:
 
     # ─── Position management ──────────────────────────────────────────────────
 
-    async def open_position(self, opp: Opportunity) -> PaperTrade | None:
-        async with self._lock:
-            if len(self.positions) >= settings.max_open_positions:
-                logger.debug(f"Max positions reached ({settings.max_open_positions}), skipping")
-                return None
+    def open_position(self, opp: Opportunity) -> PaperTrade | None:
+        if len(self.positions) >= settings.max_open_positions:
+            logger.debug(f"Max positions reached ({settings.max_open_positions}), skipping")
+            return None
 
-            if opp.id in self.positions:
-                logger.debug(f"Already have position for opportunity {opp.id}")
-                return None
+        if opp.id in self.positions:
+            logger.debug(f"Already have position for opportunity {opp.id}")
+            return None
 
-            size_usd = min(settings.paper_max_position_usd, self.balance * 0.1)
-            if size_usd < 1.0:
-                logger.warning("Balance too low to open new position")
-                return None
+        size_usd = min(settings.paper_max_position_usd, self.balance * 0.1)
+        if size_usd < 1.0:
+            logger.warning("Balance too low to open new position")
+            return None
 
-            shares = size_usd / opp.market_price
+        shares = size_usd / opp.market_price
 
-            trade = PaperTrade(
-                opportunity_id = opp.id,
-                market_id      = opp.market.id,
-                question       = opp.market.question,
-                side           = opp.side,
-                entry_price    = opp.market_price,
-                size_usd       = size_usd,
-                shares         = shares,
+        is_sports = bool(opp.us_market_slug)
+        live_platform = "polymarket_us" if is_sports else "polymarket_global"
+
+        trade = PaperTrade(
+            opportunity_id = opp.id,
+            market_id      = opp.market.id,
+            question       = opp.market.question,
+            side           = opp.side,
+            entry_price    = opp.market_price,
+            size_usd       = size_usd,
+            shares         = shares,
+            live_platform  = live_platform if (self.live_mode or self.us_live_mode) else None,
+        )
+
+        self.positions[opp.id] = trade
+        self.balance -= size_usd
+        self._append_trade(trade)
+
+        logger.info(
+            f"OPEN  {trade.side} {trade.question[:45]}... "
+            f"@ {trade.entry_price:.3f} | ${size_usd:.2f} | "
+            f"opp_id={opp.id}"
+        )
+
+        # ── Live execution — US platform (sports) ─────────────────────────────
+        if is_sports and self.us_live_mode:
+            quantity = max(1, int(size_usd / opp.market_price))
+            order = self._us_clob.place_order(
+                market_slug = opp.us_market_slug,
+                side        = str(opp.side),
+                price       = opp.market_price,
+                quantity    = quantity,
             )
+            if order:
+                trade = trade.model_copy(update={
+                    "live_order_id": order.get("id"),
+                    "live_platform": "polymarket_us",
+                })
+                self.positions[opp.id] = trade
+                self._append_trade(trade)
+            else:
+                logger.warning(
+                    "US live order failed for {} — paper trade kept",
+                    opp.market.question[:45],
+                )
 
-            self.positions[opp.id] = trade
-            self.balance -= size_usd
-            self._append_trade(trade)
+        # ── Live execution — global CLOB (weather/politics/crypto) ───────────
+        elif not is_sports and self.live_mode:
+            token_id = opp.clob_token_id
+            if token_id:
+                order_id = self._clob.place_order(
+                    token_id = token_id,
+                    side     = str(opp.side),
+                    price    = opp.market_price,
+                    size_usd = size_usd,
+                )
+                if order_id:
+                    trade = trade.model_copy(update={"clob_order_id": order_id})
+                    self.positions[opp.id] = trade
+                    self._append_trade(trade)
+                else:
+                    logger.warning(
+                        "Global CLOB order failed for {} — paper trade kept",
+                        opp.market.question[:45],
+                    )
+            else:
+                logger.warning(
+                    "No CLOB token ID for {} — skipping live order",
+                    opp.market.question[:45],
+                )
 
-            logger.info(
-                f"📂 OPEN  {trade.side} {trade.question[:45]}... "
-                f"@ {trade.entry_price:.3f} | ${size_usd:.2f} | "
-                f"opp_id={opp.id}"
-            )
-            return trade
+        return trade
 
-    async def close_position(self, opportunity_id: str, exit_price: float) -> PaperTrade:
-        async with self._lock:
-            trade = self.positions.pop(opportunity_id)
+    def close_position(self, opportunity_id: str, exit_price: float) -> PaperTrade:
+        trade = self.positions.pop(opportunity_id)
 
-            trade = trade.model_copy(update={
-                "status":     TradeStatus.CLOSED,
-                "exit_price": exit_price,
-                "closed_at":  datetime.now(timezone.utc),
-            })
+        trade = trade.model_copy(update={
+            "status":     TradeStatus.CLOSED,
+            "exit_price": exit_price,
+            "closed_at":  datetime.now(timezone.utc),
+        })
 
-            proceeds = exit_price * trade.shares
-            self.balance += proceeds
-            self.closed_trades.append(trade)
-            self._append_trade(trade)
+        proceeds = exit_price * trade.shares
+        self.balance += proceeds
+        self.closed_trades.append(trade)
+        self._append_trade(trade)
 
-            emoji = "✅" if trade.pnl_usd >= 0 else "❌"
-            logger.info(
-                f"{emoji} CLOSE {trade.side} {trade.question[:45]}... "
-                f"@ {exit_price:.3f} | PnL=${trade.pnl_usd:+.2f} ({trade.pnl_pct:+.1f}%)"
-            )
-            return trade
+        emoji = "✅" if trade.pnl_usd >= 0 else "❌"
+        logger.info(
+            f"{emoji} CLOSE {trade.side} {trade.question[:45]}... "
+            f"@ {exit_price:.3f} | PnL=${trade.pnl_usd:+.2f} ({trade.pnl_pct:+.1f}%)"
+        )
+
+        # ── Live execution — cancel / record loss ─────────────────────────────
+        if trade.live_platform == "polymarket_us" and self.us_live_mode:
+            if trade.live_order_id:
+                self._us_clob.cancel_order(trade.live_order_id)
+            if trade.pnl_usd < 0:
+                self._us_clob.record_loss(abs(trade.pnl_usd))
+
+        elif self.live_mode and trade.clob_order_id:
+            self._clob.cancel_order(trade.clob_order_id)
+            if trade.pnl_usd < 0:
+                self._clob.record_loss(abs(trade.pnl_usd))
+
+        return trade
 
     def mark_to_market(self, opportunity_id: str, current_price: float) -> None:
         """Update unrealised P&L display value (does not close position)."""
