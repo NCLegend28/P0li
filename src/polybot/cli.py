@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 import time
 from datetime import datetime, timezone
 
@@ -396,9 +395,24 @@ async def sports_scan_loop(
                     await alerter.alert_opportunity(opp)
                     await alerter.alert_trade_opened(trade)
 
-        # ── Countdown sleep ────────────────────────────────────────────────────
-        sleep_total = settings.sports_scan_interval_seconds
-        elapsed     = 0.0
+        # ── Countdown sleep (adaptive: fast only when a held game is near tip-off) ─
+        # A position opened 6h before the game doesn't need 15s scans yet —
+        # that burns API quota for no benefit. Only accelerate inside 3h.
+        near_game = any(
+            t.live_platform == "polymarket_us"
+            and any(
+                p.us_slug == t.us_market_slug
+                and p.global_market.hours_until_close < 3.0
+                for p in matched
+            )
+            for t in trader.positions.values()
+        )
+        sleep_total = (
+            max(15, settings.sports_scan_interval_seconds // 2)
+            if near_game
+            else settings.sports_scan_interval_seconds
+        )
+        elapsed = 0.0
         while elapsed < sleep_total and not bot_state.stop_event.is_set():
             ds.sports_next_scan_in = max(0.0, sleep_total - elapsed)
             await asyncio.sleep(1.0)

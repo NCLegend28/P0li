@@ -240,8 +240,17 @@ class AsyncPolymarketUSClient:
             secret_key=secret_key,
         )
 
-    async def list_events(self, limit: int = 50, active: bool = True) -> dict[str, Any]:
-        return await self._client.events.list({"limit": limit, "active": active})
+    async def list_events(
+        self,
+        limit: int = 50,
+        active: bool = True,
+        ended: bool = False,
+        start_date_min: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict = {"limit": limit, "active": active, "ended": ended}
+        if start_date_min:
+            params["startDateMin"] = start_date_min
+        return await self._client.events.list(params)
 
     async def get_book(self, slug: str) -> dict[str, Any]:
         return await self._client.markets.book(slug)

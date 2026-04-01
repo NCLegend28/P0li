@@ -38,11 +38,15 @@ from polybot.strategies.weather import evaluate_weather_markets, parse_question
 
 async def fetch_markets(state: ScanState) -> dict[str, Any]:
     logger.info("📡 Fetching markets from Gamma API...")
-    async with GammaClient() as gamma:
-        markets = await gamma.fetch_markets(
-            limit         = 500,
-            min_liquidity = settings.min_liquidity_usd,
-        )
+    try:
+        async with GammaClient() as gamma:
+            markets = await gamma.fetch_markets(
+                limit         = 500,
+                min_liquidity = settings.min_liquidity_usd,
+            )
+    except httpx.ConnectError as exc:
+        logger.warning("Gamma API unreachable — skipping scan: {}", exc)
+        return {"raw_markets": []}
     cats: dict[str, int] = {}
     for m in markets:
         cats[m.category] = cats.get(m.category, 0) + 1

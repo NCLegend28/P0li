@@ -31,7 +31,9 @@ dev = [
 ]
 
 [project.scripts]
-scan = "polybot.cli:run"
+scan              = "polybot.cli:run"
+backtest-weather  = "polybot.backtest.engine:run"
+backtest-sports   = "polybot.backtest.sports_engine:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/polybot"]

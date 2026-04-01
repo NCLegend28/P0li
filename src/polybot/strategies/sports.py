@@ -20,14 +20,29 @@ Analogy: same structure as the weather bot.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
 
-from polybot.api.espn import Game, InjuryReport
+from polybot.api.espn import ESPNClient, Game, InjuryReport
 from polybot.api.odds import GameOdds
 from polybot.models import MarketCategory, Market, Opportunity, Side
+
+
+# ─── MatchedGame ──────────────────────────────────────────────────────────────
+
+@dataclass
+class MatchedGame:
+    global_market: Market
+    us_slug: str
+    us_yes_price: float
+    us_book_depth: float
+    game_start: datetime        # from ESPN, authoritative
+    status: str                 # "status_scheduled" etc.
+    home_team: str
+    away_team: str
 
 
 # ─── Edge computation ─────────────────────────────────────────────────────────
@@ -78,6 +93,24 @@ def devig_odds(home_implied: float, away_implied: float) -> tuple[float, float]:
     return round(home_implied / total, 4), round(away_implied / total, 4)
 
 
+# ─── Kelly sizing ─────────────────────────────────────────────────────────────
+
+def kelly_size(
+    edge: float,
+    price: float,
+    bankroll: float,
+    open_exposure: float,
+    fraction: float = 0.25,
+) -> float:
+    if price <= 0 or price >= 1:
+        return 0.0
+    full_kelly = edge / (1.0 - price)
+    raw = bankroll * full_kelly * fraction
+    raw = max(2.0, min(raw, 15.0))                    # $2 floor, $15 cap
+    remaining = (bankroll * 0.40) - open_exposure     # 40% exposure cap
+    return min(raw, max(remaining, 0.0))
+
+
 # ─── Entry thresholds ─────────────────────────────────────────────────────────
 
 def _should_trade(
@@ -108,8 +141,9 @@ class SportsStrategy:
     Output: Opportunity objects targeting the US platform
     """
 
-    def __init__(self, min_edge: float = 0.05):
+    def __init__(self, min_edge: float = 0.05, espn_client: ESPNClient | None = None):
         self._min_edge = min_edge
+        self._espn = espn_client or ESPNClient()
 
     def evaluate(
         self,
@@ -186,11 +220,9 @@ class SportsStrategy:
 
         # Back-to-back penalty (NBA fatigue)
         if today_games and yesterday_games:
-            from polybot.api.espn import ESPNClient
-            espn = ESPNClient()
             q = global_market.question
             for team_keyword in _extract_team_keywords(q):
-                if espn.is_back_to_back(team_keyword, yesterday_games, today_games):
+                if self._espn.is_back_to_back(team_keyword, yesterday_games, today_games):
                     notes_parts.append(f"B2B:{team_keyword}")
                     logger.info("B2B detected for {}: {}", us_slug, team_keyword)
 
@@ -257,13 +289,14 @@ def _extract_team_keywords(question: str) -> list[str]:
 
 
 def evaluate_sports_markets(
-    matched_pairs: list[dict],   # list of {global_market, us_slug, us_yes_price, us_book_depth}
+    matched_pairs: list[MatchedGame],
     odds_by_game: dict[str, GameOdds],   # keyed by us_slug
     injuries: list[InjuryReport],
     today_games: list[Game],
     yesterday_games: list[Game],
+    bankroll: float = 100.0,
+    open_exposure: float = 0.0,
     min_edge: float = 0.05,
-    position_size_usd: float = 10.0,
 ) -> list[Opportunity]:
     """
     Batch-evaluate all matched pairs and return tradeable opportunities.
@@ -273,23 +306,29 @@ def evaluate_sports_markets(
     opportunities: list[Opportunity] = []
 
     for pair in matched_pairs:
-        global_market: Market = pair["global_market"]
-        us_slug: str = pair["us_slug"]
-        us_price: float = pair["us_yes_price"]
-        depth: float = pair.get("us_book_depth", 0.0)
+        # ── Status gate: only trade pre-game markets ──────────────────────────
+        if pair.status != "status_scheduled":
+            logger.debug("Skipping {} — status={}", pair.us_slug, pair.status)
+            continue
 
         opp = strategy.evaluate(
-            global_market=global_market,
-            us_slug=us_slug,
-            us_yes_price=us_price,
-            us_book_depth=depth,
-            odds_data=odds_by_game.get(us_slug),
+            global_market=pair.global_market,
+            us_slug=pair.us_slug,
+            us_yes_price=pair.us_yes_price,
+            us_book_depth=pair.us_book_depth,
+            odds_data=odds_by_game.get(pair.us_slug),
             injuries=injuries,
             today_games=today_games,
             yesterday_games=yesterday_games,
-            position_size_usd=position_size_usd,
+            position_size_usd=15.0,  # worst-case cap for book-depth guard
         )
         if opp:
+            opp.size_usd = kelly_size(
+                edge=opp.edge,
+                price=opp.market_price,
+                bankroll=bankroll,
+                open_exposure=open_exposure,
+            )
             opportunities.append(opp)
 
     return opportunities

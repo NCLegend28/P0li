@@ -36,6 +36,7 @@ class MatchedPair:
     us_yes_price: float           # Layer 3: current YES price on US platform
     us_book_depth: float = 0.0    # approximate USD depth on US order book
     match_score: float = 0.0      # fuzzy match quality 0.0–1.0
+    us_status: str = "status_scheduled"  # from US event dict (closed/active flag)
 
 
 class SportsScanState(BaseModel):

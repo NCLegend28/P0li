@@ -498,8 +498,13 @@ async def main(days_back: int = 14, min_edge: float = 0.08) -> None:
     print_report(result)
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Sync entry point for `backtest-weather` console script."""
     import sys
     days = int(sys.argv[1])   if len(sys.argv) > 1 else 14
     edge = float(sys.argv[2]) if len(sys.argv) > 2 else 0.08
     asyncio.run(main(days_back=days, min_edge=edge))
+
+
+if __name__ == "__main__":
+    run()
