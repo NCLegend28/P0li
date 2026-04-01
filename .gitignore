@@ -24,8 +24,14 @@ data/
 .pytest_cache/
 uv.lock
 
-.claude/
+# Claude Code - keep commands (skills) but ignore settings
+.claude/*
+!.claude/commands/
+
+# Markdown - keep README
 *.md
+!README.md
+!.claude/commands/*.md
 
 p0li
 p0li.pub
