@@ -51,6 +51,7 @@ class SportsScanState(BaseModel):
 
     # ── Layer 3: US execution targets (Polymarket US SDK) ────────────────────
     us_events: list[dict] = Field(default_factory=list)
+    us_balance: float = 0.0  # USDC balance from US Polymarket account
 
     # ── Matched pairs (global ↔ US for same game) ─────────────────────────────
     matched_pairs: list[MatchedPair] = Field(default_factory=list)

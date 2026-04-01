@@ -264,5 +264,13 @@ class AsyncPolymarketUSClient:
     async def list_markets(self, limit: int = 100) -> dict[str, Any]:
         return await self._client.markets.list({"limit": limit})
 
+    async def get_balance(self) -> dict[str, Any]:
+        """Fetch account balances (USDC available + in positions)."""
+        return await self._client.account.balances()
+
+    async def get_positions(self) -> dict[str, Any]:
+        """Fetch open positions."""
+        return await self._client.portfolio.positions()
+
     async def close(self) -> None:
         await self._client.close()

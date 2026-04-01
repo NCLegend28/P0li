@@ -420,7 +420,7 @@ async def fetch_global_sports(state: SportsScanState) -> dict[str, Any]:
 
 async def fetch_us_events(state: SportsScanState) -> dict[str, Any]:
     """
-    Layer 3: Fetch active events from the Polymarket US SDK.
+    Layer 3: Fetch active events and account balance from the Polymarket US SDK.
 
     Requires POLYMARKET_KEY_ID + POLYMARKET_SECRET_KEY.
     If keys are not configured, returns empty list (sports bot degrades gracefully).
@@ -430,7 +430,7 @@ async def fetch_us_events(state: SportsScanState) -> dict[str, Any]:
             "SPORTS Layer 3: POLYMARKET_KEY_ID/SECRET not set — "
             "add them to .env to enable US market scanning"
         )
-        return {"us_events": []}
+        return {"us_events": [], "us_balance": 0.0}
 
     from polybot.api.polymarket_us import AsyncPolymarketUSClient
 
@@ -440,6 +440,9 @@ async def fetch_us_events(state: SportsScanState) -> dict[str, Any]:
         secret_key=settings.polymarket_secret_key,
     )
     try:
+        # Fetch balance and events in parallel
+        balance_task = asyncio.create_task(client.get_balance())
+
         # ended=False filters settled games; startDateMin drops events older than
         # yesterday so we never see November 2025 ghost markets again.
         yesterday = (date.today() - timedelta(days=1)).isoformat()
@@ -451,6 +454,33 @@ async def fetch_us_events(state: SportsScanState) -> dict[str, Any]:
         )
         events = result.get("events", []) if isinstance(result, dict) else result
         logger.info("SPORTS Layer 3: {} active US events", len(events))
+
+        # Get balance result
+        us_balance = 0.0
+        try:
+            balance_result = await balance_task
+            # Extract USDC balance from response
+            if isinstance(balance_result, dict):
+                # Try common field names
+                for field in ("balance", "available", "usdc", "usd"):
+                    val = balance_result.get(field)
+                    if val is not None:
+                        try:
+                            us_balance = float(val)
+                            break
+                        except (TypeError, ValueError):
+                            pass
+                # Try nested balances array
+                for bal in balance_result.get("balances", []):
+                    if bal.get("currency", "").upper() in ("USDC", "USD"):
+                        try:
+                            us_balance = float(bal.get("amount", 0))
+                            break
+                        except (TypeError, ValueError):
+                            pass
+            logger.info("SPORTS Layer 3: US balance ${:.2f}", us_balance)
+        except Exception as e:
+            logger.warning("SPORTS Layer 3: Failed to fetch US balance: {}", e)
 
         # Flatten events → market dicts.
         # Titles and startTime live on the event, not the market — propagate them
@@ -473,10 +503,10 @@ async def fetch_us_events(state: SportsScanState) -> dict[str, Any]:
                     enriched["status"] = event_status
                 markets.append(enriched)
 
-        return {"us_events": markets}
+        return {"us_events": markets, "us_balance": us_balance}
     except Exception as e:
         logger.error("SPORTS Layer 3: US SDK fetch failed: {}", e)
-        return {"us_events": []}
+        return {"us_events": [], "us_balance": 0.0}
     finally:
         await client.close()
 
@@ -677,11 +707,13 @@ async def run_sports_strategy(state: SportsScanState) -> dict[str, Any]:
             away_team=espn_game.away_team if espn_game else "",
         ))
 
-    # Kelly sizing inputs
+    # Kelly sizing inputs — use real US balance if available, else paper balance
     open_exposure = sum(
         t.size_usd for t in state.open_positions
         if t.status == TradeStatus.OPEN and t.live_platform == "polymarket_us"
     )
+    bankroll = state.us_balance if state.us_balance > 0 else settings.paper_starting_balance
+    logger.debug("SPORTS strategy: using bankroll ${:.2f} (US: ${:.2f})", bankroll, state.us_balance)
 
     opportunities = evaluate_sports_markets(
         matched_pairs=matched_games,
@@ -689,7 +721,7 @@ async def run_sports_strategy(state: SportsScanState) -> dict[str, Any]:
         injuries=state.injuries,
         today_games=state.today_games,
         yesterday_games=state.yesterday_games,
-        bankroll=settings.paper_starting_balance,
+        bankroll=bankroll,
         open_exposure=open_exposure,
         min_edge=settings.sports_min_edge,
     )
