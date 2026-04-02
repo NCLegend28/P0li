@@ -24,7 +24,6 @@ data/
 .pytest_cache/
 uv.lock
 
-.claude/
 *.md
 
 p0li
