@@ -621,9 +621,9 @@ function condenseCrypto(q){
 
 function condenseGame(q){
   // "Will the Lakers beat the Celtics on Mar 29?" → "Lakers vs Celtics"
-  const m=q.match(/will (?:the )?(.+?) (?:beat|defeat|win against|vs[.]?) (?:the )?(.+?)(?:\s+on\s+|\s+in\s+|\?)/i);
+  const m=q.match(/will (?:the )?(.+?) (?:beat|defeat|win against|vs[.]?) (?:the )?(.+?)(?:\\s+on\\s+|\\s+in\\s+|[?])/i);
   if(m)return m[1].trim().replace(/^Los Angeles /,'LA ').replace(/^Golden State /,'GS ')+' vs '+m[2].trim().replace(/^Los Angeles /,'LA ').replace(/^Golden State /,'GS ');
-  return q.replace(/^will\s+(?:the\s+)?/i,'').replace(/\?.*$/,'').slice(0,42);
+  return q.replace(/^will\\s+(?:the\\s+)?/i,'').replace(/[?].*$/,'').slice(0,42);
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
