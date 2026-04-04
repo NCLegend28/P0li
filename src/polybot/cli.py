@@ -258,11 +258,14 @@ async def scan_loop(
         if alerter and (open_count > 0 or exit_count > 0):
             await alerter.alert_scan_summary(scan_n, open_count, exit_count)
 
-        # Send live balance after every scan that had activity
-        if alerter and settings.live_trading and trader._clob:
-            balance = trader._clob.get_balance()
-            if open_count > 0 or exit_count > 0:
-                await alerter.alert_live_balance(balance)
+        # Sync live balance into dashboard every scan
+        if settings.live_trading and trader._clob:
+            live_bal = trader._clob.get_balance()
+            trader.balance = live_bal
+            ds.live_mode    = True
+            ds.live_balance = live_bal
+            if alerter and (open_count > 0 or exit_count > 0):
+                await alerter.alert_live_balance(live_bal)
             # Alert if daily cap is close or hit
             if trader._clob._daily_loss >= settings.max_daily_loss_usd:
                 await alerter.alert_daily_cap_hit(trader._clob._daily_loss)

@@ -147,15 +147,20 @@ class PaperTrader:
                 quantity    = quantity,
             )
             if order:
+                order_id = order.get("id")
                 trade = trade.model_copy(update={
-                    "live_order_id": order.get("id"),
+                    "live_order_id": order_id,
                     "live_platform": "polymarket_us",
                 })
                 self.positions[opp.id] = trade
                 self._append_trade(trade)
+                logger.success(
+                    "LIVE ORDER PLACED (US) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
+                    trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
+                )
             else:
                 logger.warning(
-                    "US live order failed for {} — paper trade kept",
+                    "US live order FAILED for {} — paper trade kept",
                     opp.market.question[:45],
                 )
 
@@ -173,9 +178,13 @@ class PaperTrader:
                     trade = trade.model_copy(update={"clob_order_id": order_id})
                     self.positions[opp.id] = trade
                     self._append_trade(trade)
+                    logger.success(
+                        "LIVE ORDER PLACED (global) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
+                        trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
+                    )
                 else:
                     logger.warning(
-                        "Global CLOB order failed for {} — paper trade kept",
+                        "Global CLOB order FAILED for {} — paper trade kept",
                         opp.market.question[:45],
                     )
             else:
