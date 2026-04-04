@@ -25,7 +25,7 @@ from polybot.scanner.state import ScanState
 from polybot.scanner.sports_graph import build_sports_scanner_graph
 from polybot.scanner.sports_state import SportsScanState
 from polybot.telegram.bot import BotState, TelegramAlerter, run_bot_async
-from polybot.ui.dashboard import Dashboard, DashboardState
+from polybot.ui.dashboard import Dashboard, DashboardState, NullDashboard
 from polybot.web.server import run_server, set_dashboard_state
 
 
@@ -339,11 +339,17 @@ async def sports_scan_loop(
             key=lambda x: abs(x["edge"]),
             reverse=True,
         )
-        # Overlay confidence from actual opportunities onto feed rows
-        opp_slugs = {o.us_market_slug: o.confidence for o in opps if o.us_market_slug}
+        # Overlay opportunity data (conf, side, kelly size) onto matching feed rows
+        opp_by_slug = {o.us_market_slug: o for o in opps if o.us_market_slug}
         for row in ds.sports_feed:
-            if row["slug"] in opp_slugs:
-                row["confidence"] = opp_slugs[row["slug"]]
+            opp = opp_by_slug.get(row["slug"])
+            if opp:
+                row["confidence"]     = opp.confidence
+                row["side"]           = str(opp.side)
+                row["size_usd"]       = opp.size_usd
+                row["is_opportunity"] = True
+            else:
+                row.setdefault("is_opportunity", False)
 
         if matched or opps:
             dash.log(
@@ -467,7 +473,8 @@ async def main() -> None:
             run_server(settings.web_host, settings.web_port), name="web"
         ))
 
-    with Dashboard(ds) as dash:
+    DashClass = NullDashboard if settings.headless else Dashboard
+    with DashClass(ds) as dash:
         dash.log("Polymarket Bot starting up...", "INFO")
         dash.log(
             f"Config: interval=[cyan]{settings.scan_interval_seconds}s[/]  "
@@ -548,6 +555,16 @@ async def main() -> None:
 
 def run() -> None:
     asyncio.run(main())
+
+
+def run_dashboard() -> None:
+    """Entry point for the standalone dashboard service (reads from scanner via WebSocket)."""
+    async def _dashboard_main() -> None:
+        _configure_logging()
+        from polybot.web.dashboard_service import run_dashboard_server
+        await run_dashboard_server(settings.dashboard_host, settings.dashboard_port)
+
+    asyncio.run(_dashboard_main())
 
 
 if __name__ == "__main__":

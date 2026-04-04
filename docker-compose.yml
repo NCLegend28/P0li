@@ -1,0 +1,50 @@
+version: "3.9"
+
+# Two independent services that communicate over the internal Docker network.
+#
+#   weather-bot  — headless scanner, publishes state via WebSocket on :8765 (internal only)
+#   dashboard    — consumes scanner state, serves browser UI on :8766 (public)
+#
+# Usage:
+#   cp .env.weather.example .env.weather   # fill in your keys
+#   cp .env.dashboard.example .env.dashboard
+#   docker compose up -d
+
+services:
+  weather-bot:
+    build: .
+    command: ["uv", "run", "scan"]
+    restart: unless-stopped
+    env_file: .env.weather
+    volumes:
+      - trades_data:/app/data/trades
+    # Port 8765 is intentionally NOT exposed to the host.
+    # Only the dashboard service (on the same Docker network) connects to it.
+    expose:
+      - "8765"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  dashboard:
+    build: .
+    command: ["uv", "run", "dashboard"]
+    restart: unless-stopped
+    env_file: .env.dashboard
+    ports:
+      - "8766:8766"
+    depends_on:
+      weather-bot:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8766/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  trades_data:

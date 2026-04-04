@@ -110,6 +110,27 @@ class Opportunity(BaseModel):
         return ""
 
 
+# ─── Live Game Context ────────────────────────────────────────────────────────
+
+class LiveGameContext(BaseModel):
+    """Live state of an in-progress game, fetched from ESPN."""
+    game_id:           str
+    sport:             str       # "NBA", "NFL", "EPL", etc.
+    home_team:         str
+    away_team:         str
+    home_score:        int
+    away_score:        int
+    period:            int       # quarter/half/set number
+    seconds_remaining: float     # total seconds left in the game
+    is_final:          bool = False
+    fetched_at:        datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def score_diff(self) -> int:
+        """Home score minus away score."""
+        return self.home_score - self.away_score
+
+
 # ─── Paper Trade ──────────────────────────────────────────────────────────────
 
 class PaperTrade(BaseModel):

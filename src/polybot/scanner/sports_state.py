@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from polybot.api.espn import Game, InjuryReport
 from polybot.api.odds import GameOdds
-from polybot.models import Market, Opportunity, PaperTrade
+from polybot.models import LiveGameContext, Market, Opportunity, PaperTrade
 from polybot.strategies.exit import ExitSignal
 
 
@@ -37,6 +37,8 @@ class MatchedPair:
     us_book_depth: float = 0.0    # approximate USD depth on US order book
     match_score: float = 0.0      # fuzzy match quality 0.0–1.0
     us_status: str = "status_scheduled"  # from US event dict (closed/active flag)
+    espn_game_id: str = ""        # ESPN event ID — join key for live state fetches
+    live_context: LiveGameContext | None = None  # populated for in-progress games
 
 
 class SportsScanState(BaseModel):
@@ -66,6 +68,11 @@ class SportsScanState(BaseModel):
     # ── Strategy output ───────────────────────────────────────────────────────
     opportunities: list[Opportunity] = Field(default_factory=list)
     exit_signals: list[ExitSignal] = Field(default_factory=list)
+
+    # ── Live in-game state + output ───────────────────────────────────────────
+    live_game_states: list[LiveGameContext] = Field(default_factory=list)
+    live_opportunities: list[Opportunity] = Field(default_factory=list)
+    live_exit_signals: list[ExitSignal] = Field(default_factory=list)
 
     # ── Injected by CLI before each scan ─────────────────────────────────────
     open_positions: list[PaperTrade] = Field(default_factory=list)

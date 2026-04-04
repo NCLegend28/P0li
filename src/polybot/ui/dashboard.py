@@ -182,10 +182,10 @@ def _panel_dims(term_w: int, term_h: int) -> dict[str, tuple[int, int]]:
     pos_h    = max(6,  int(main_h * 3 / 5))
     opp_h    = max(6,  main_h - pos_h)
 
-    pnl_h    = max(5,  int(main_h * 3 / 11))
-    closed_h = max(4,  int(main_h * 2 / 11))
-    sptfeed_h = max(5, int(main_h * 3 / 11))
-    wxfeed_h = max(4,  main_h - pnl_h - sptfeed_h - closed_h)
+    pnl_h     = max(5,  int(main_h * 3 / 12))
+    closed_h  = max(4,  int(main_h * 2 / 12))
+    sptfeed_h = max(6,  int(main_h * 5 / 12))   # sports gets the biggest slice
+    wxfeed_h  = max(3,  main_h - pnl_h - sptfeed_h - closed_h)
 
     return {
         "left":          (cw(left_w),    ch(main_h)),
@@ -618,110 +618,230 @@ def _market_feed_panel(state: DashboardState, w: int, h: int) -> Panel:
                  border_style="grey30", style="on grey7", padding=(0, 0))
 
 
-# ─── Panel: SPORTS FEED ──────────────────────────────────────────────────────
+# ─── Panel: SPORTS (ESPN × Kraken) ───────────────────────────────────────────
+
+_SPORTS_LEAGUES = {"nba", "nfl", "mlb", "nhl", "mls", "ucl", "epl"}
+
+_LEAGUE_COLORS = {
+    "NBA": C_CYAN,
+    "NFL": C_ORANGE,
+    "MLB": C_GREEN,
+    "NHL": C_BLUE,
+    "MLS": C_TEAL,
+}
+
+# Per-league color overrides for the panel border when opps are live
+_OPP_BORDER = "dark_orange"
+
+
+def _slug_league_teams(slug: str) -> tuple[str, str, str]:
+    """
+    Parse (LEAGUE, TEAM1, TEAM2) abbreviations from a US market slug.
+
+    'aec-nba-sa-chi-2025-11-10' → ('NBA', 'SA', 'CHI')
+    """
+    parts = slug.lower().split("-")
+    league, teams = "", []
+    for part in parts:
+        if part in _SPORTS_LEAGUES:
+            league = part.upper()
+        elif not part.isdigit() and len(part) >= 2 and part not in ("aec",):
+            if len(teams) < 2:
+                teams.append(part.upper()[:3])
+    return (
+        league,
+        teams[0] if teams else "—",
+        teams[1] if len(teams) > 1 else "—",
+    )
+
 
 def _sports_feed_panel(state: DashboardState, w: int, h: int) -> Panel:
     """
-    Shows matched global ↔ US market pairs with the cross-platform edge.
+    ESPN × Kraken sports panel.
 
-    Columns: GAME · GLOBAL · US · EDGE · CONF
-    When sports is disabled or no data yet: shows a one-line status.
+    Opportunities (⚡) are shown first with side, Kelly size, and confidence.
+    Matched pairs fill remaining rows sorted by descending |edge|.
+
+    Layout adapts to terminal width:
+      narrow  (w<38): sig · league · game · edge
+      medium  (w<50): + US/GL prices
+      wide    (w<60): + side column
+      full    (w≥60): + Kelly size
     """
     from polybot.config import settings as cfg
 
-    max_rows = max(1, h)
+    n_opps = len(state.sports_opportunities)
+    next_s = int(state.sports_next_scan_in)
+
+    # ── Panel title ───────────────────────────────────────────────────────────
+    opp_tag = (
+        f"  [{C_YELLOW}]⚡ {n_opps} OPP{'S' if n_opps != 1 else ''}[/]"
+        if n_opps else ""
+    )
+    scan_tag = (
+        f"  [{C_DIM}]#{state.sports_scan_number}[/]"
+        if state.sports_scan_number else ""
+    )
+    pair_tag = (
+        f"  [{C_DIM}]{state.sports_matched} pairs[/]"
+        if state.sports_matched else ""
+    )
+    next_tag = f"  [{C_DIM}]next {next_s}s[/]" if next_s > 0 else ""
+    panel_title = f"[{C_TEAL}]◈ SPORTS[/]{opp_tag}{scan_tag}{pair_tag}{next_tag}"
 
     if not cfg.sports_enabled:
-        msg = Align(
-            f"[{C_DIM}]sports disabled — set SPORTS_ENABLED=true[/]",
-            align="center", vertical="middle",
+        return Panel(
+            Align(f"[{C_DIM}]SPORTS_ENABLED=false[/]", align="center", vertical="middle"),
+            title=panel_title, border_style="grey30", style="on grey7",
         )
-        return Panel(msg,
-                     title=f"[{C_TEAL}]◈ SPT FEED[/]",
-                     border_style="grey30", style="on grey7")
-
-    # Header stats row (scan # and last scan time)
-    stats_parts: list[str] = []
-    if state.sports_scan_number:
-        stats_parts.append(f"[{C_DIM}]scan[/] [{C_CYAN}]#{state.sports_scan_number}[/]")
-    if state.sports_matched:
-        stats_parts.append(f"[{C_DIM}]matched[/] [{C_WHITE}]{state.sports_matched}[/]")
-    if state.sports_opportunities:
-        stats_parts.append(f"[{C_YELLOW}]{len(state.sports_opportunities)} opps[/]")
-    if state.sports_scan_duration:
-        stats_parts.append(f"[{C_DIM}]{state.sports_scan_duration:.1f}s[/]")
-    next_s = int(state.sports_next_scan_in)
-    if next_s > 0:
-        stats_parts.append(f"[{C_DIM}]next {next_s}s[/]")
 
     if not state.sports_feed:
-        content = f"  {'  ·  '.join(stats_parts) if stats_parts else ''}\n" if stats_parts else ""
-        msg = Align(
-            f"{content}[{C_DIM}]waiting for sports scan...[/]",
-            align="center", vertical="middle",
+        return Panel(
+            Align(f"[{C_DIM}]waiting for sports scan...[/]", align="center", vertical="middle"),
+            title=panel_title, border_style="grey30", style="on grey7",
         )
-        return Panel(msg,
-                     title=f"[{C_TEAL}]◈ SPT FEED  [{C_DIM}]—[/][/]",
-                     border_style="grey30", style="on grey7")
 
-    # Column widths
-    show_conf = w >= 52
-    show_slug = w >= 38
-    fixed_w   = 6 + 6 + 7 + (5 if show_conf else 0)   # GLOBAL + US + EDGE + CONF
-    title_len = max(10, w - fixed_w - (8 if show_slug else 4))
+    # ── Column visibility thresholds ──────────────────────────────────────────
+    show_prices = w >= 44   # US / GL price columns
+    show_side   = w >= 52   # ▸YES / ▸NO column
+    show_size   = w >= 60   # Kelly $XX column
+
+    # ── Sort: opportunities first (by edge desc), then pairs (by edge desc) ──
+    opps_rows  = sorted(
+        [r for r in state.sports_feed if r.get("is_opportunity")],
+        key=lambda r: abs(r.get("edge", 0)), reverse=True,
+    )
+    pairs_rows = sorted(
+        [r for r in state.sports_feed if not r.get("is_opportunity")],
+        key=lambda r: abs(r.get("edge", 0)), reverse=True,
+    )
+
+    max_rows   = max(2, h)
+    n_opp_rows = min(len(opps_rows), max_rows)
+    sep_row    = 1 if opps_rows and pairs_rows and n_opp_rows < max_rows else 0
+    n_pair_rows = max(0, max_rows - n_opp_rows - sep_row)
+
+    # ── Build table ───────────────────────────────────────────────────────────
+    # Column budget
+    fixed = 2 + 4 + 8   # sig(2) + league(4) + edge(8)
+    if show_prices: fixed += 6 + 6
+    if show_side:   fixed += 5
+    if show_size:   fixed += 5
+    game_w = max(7, w - fixed - 4)
 
     t = Table(
         box=box.SIMPLE, show_header=True,
         header_style=f"bold {C_TEAL}",
         style="on grey7", expand=True, padding=(0, 1),
     )
-    t.add_column("GAME",   style=C_WHITE,  no_wrap=True, max_width=title_len)
-    t.add_column("GLOBAL", justify="right", width=6)
-    t.add_column("US",     justify="right", width=6)
-    t.add_column("EDGE",   justify="right", width=7)
-    if show_conf:
-        t.add_column("CONF", justify="right", width=5)
+    t.add_column("",      width=2,        no_wrap=True)          # ⚡ / space
+    t.add_column("LGE",   width=4,        no_wrap=True)          # NBA / NFL
+    t.add_column("GAME",  max_width=game_w, no_wrap=True)        # teams
+    if show_side:
+        t.add_column("DIR", width=5,      justify="center", no_wrap=True)
+    if show_prices:
+        t.add_column("US",  width=6,      justify="right",  no_wrap=True)
+        t.add_column("GL",  width=6,      justify="right",  no_wrap=True)
+    t.add_column("EDGE",  width=8,        justify="right",  no_wrap=True)
+    t.add_column("",      width=4,        no_wrap=True)          # conf dots
+    if show_size:
+        t.add_column("SIZE", width=5,     justify="right",  no_wrap=True)
 
-    for pair in state.sports_feed[:max_rows]:
-        g_price = pair.get("global_price", 0.0)
-        u_price = pair.get("us_price",     0.0)
-        edge    = pair.get("edge",          0.0)
-        conf    = pair.get("confidence",    0.7)
-        title   = pair.get("title", pair.get("slug", ""))
+    def _add_row(entry: dict, is_opp: bool) -> None:
+        slug    = entry.get("slug", "")
+        title   = entry.get("title", "")
+        g_price = entry.get("global_price", 0.0)
+        u_price = entry.get("us_price",     0.0)
+        edge    = entry.get("edge",         0.0)
+        conf    = entry.get("confidence",   0.7)
+        side    = entry.get("side",         "")
+        size    = entry.get("size_usd",     0.0)
 
-        # Edge colour: green = exploitable, yellow = borderline, dim = below threshold
+        league, t1, t2 = _slug_league_teams(slug)
+
+        # Game display: last word from each "Team A vs Team B" half, or slug abbrevs
+        if title:
+            halves = title.replace(" vs. ", " vs ").replace(" @ ", " vs ").split(" vs ")
+            if len(halves) == 2:
+                w1 = (halves[0].strip().split() or [t1])[-1]
+                w2 = (halves[1].strip().split() or [t2])[-1]
+                game_str = f"{w1} · {w2}"
+            else:
+                game_str = title
+        else:
+            game_str = f"{t1} · {t2}" if (t1 and t2) else slug
+
+        # Signal glyph
+        sig = f"[{C_YELLOW}]⚡[/]" if is_opp else f"[{C_DIM}] [/]"
+
+        # League badge
+        lc = _LEAGUE_COLORS.get(league, C_DIM)
+        lge_str = f"[bold {lc}]{league or '?'}[/]"
+
+        # Game text
+        gc = C_WHITE if is_opp else "grey62"
+        game_disp = f"[{gc}]{game_str[:game_w]}[/]"
+
+        # Edge indicator — ▲ when US is underpriced (buy YES), ▼ when overpriced
         if abs(edge) >= 0.07:
             ec = C_GREEN
         elif abs(edge) >= 0.04:
             ec = C_YELLOW
         else:
             ec = C_DIM
+        direction = "▲" if edge >= 0 else "▼"
+        edge_str = f"[{ec}]{direction}{abs(edge)*100:4.1f}¢[/]"
 
-        # Confidence indicator
-        conf_str = {1.0: f"[{C_GREEN}]●●●[/]", 0.7: f"[{C_YELLOW}]●●○[/]"}.get(
-            conf, f"[{C_RED}]●○○[/]"
-        )
+        # Confidence dots
+        conf_str = {
+            1.0: f"[{C_GREEN}]●●●[/]",
+            0.7: f"[{C_YELLOW}]●●○[/]",
+        }.get(conf, f"[{C_DIM}]●○○[/]")
 
-        edge_sign = "+" if edge >= 0 else ""
-        row = [
-            title[:title_len],
-            f"[{C_DIM}]{g_price:.3f}[/]",
-            f"[{C_WHITE}]{u_price:.3f}[/]",
-            f"[{ec}]{edge_sign}{edge:.3f}[/]",
-        ]
-        if show_conf:
-            row.append(conf_str)
+        row: list[str] = [sig, lge_str, game_disp]
+
+        if show_side:
+            if is_opp and side:
+                sc = C_GREEN if side == "YES" else C_RED
+                row.append(f"[bold {sc}]▸{side[:3]}[/]")
+            else:
+                row.append("")
+
+        if show_prices:
+            row.append(f"[{C_DIM}]{u_price:.3f}[/]")
+            row.append(f"[{'white' if is_opp else C_DIM}]{g_price:.3f}[/]")
+
+        row.append(edge_str)
+        row.append(conf_str)
+
+        if show_size:
+            if is_opp and size > 0:
+                row.append(f"[{C_YELLOW}]${size:.0f}[/]")
+            else:
+                row.append("")
+
         t.add_row(*row)
 
-    pair_count = len(state.sports_feed)
-    stats_str  = "  ·  ".join(stats_parts)
+    # Opportunity rows
+    for entry in opps_rows[:n_opp_rows]:
+        _add_row(entry, is_opp=True)
+
+    # Separator between opportunities and plain pairs
+    if sep_row:
+        ncols = t.column_count
+        t.add_row(*([f"[{C_DIM}]─[/]"] + [""] * (ncols - 1)))
+
+    # Plain matched-pair rows
+    for entry in pairs_rows[:n_pair_rows]:
+        _add_row(entry, is_opp=False)
+
+    border = _OPP_BORDER if n_opps else "grey30"
     return Panel(
         t,
-        title=(
-            f"[{C_TEAL}]◈ SPT FEED  [{C_WHITE}]{pair_count}[/][/]"
-            + (f"  [{C_DIM}]{stats_str}[/]" if stats_parts and w > 50 else "")
-        ),
-        border_style="grey30", style="on grey7", padding=(0, 0),
+        title=panel_title,
+        border_style=border,
+        style="on grey7",
+        padding=(0, 0),
     )
 
 
@@ -865,3 +985,37 @@ class Dashboard:
         while self.state.is_running:
             render(self.layout, self.state)
             await asyncio.sleep(0.5)
+
+
+class NullDashboard:
+    """
+    Headless drop-in for Dashboard — used when HEADLESS=true (VPS / no TTY).
+
+    Has the same interface as Dashboard (.log(), .run_renderer(), context manager)
+    but does not start a Rich Live session.  Log messages are still appended to
+    DashboardState.event_log so they are broadcast over the WebSocket.
+    """
+
+    def __init__(self, state: DashboardState):
+        self.state = state
+
+    def __enter__(self) -> "NullDashboard":
+        return self
+
+    def __exit__(self, *args) -> None:
+        pass
+
+    def log(self, msg: str, level: str = "INFO") -> None:
+        color = {"INFO": C_WHITE, "GOOD": C_GREEN, "WARN": C_YELLOW,
+                 "ERROR": C_RED, "TRADE": C_CYAN, "EXIT": C_MAGENTA}.get(level.upper(), C_DIM)
+        tag   = {"INFO": "·", "GOOD": "✓", "WARN": "⚠", "ERROR": "✗",
+                 "TRADE": "◉", "EXIT": "◎"}.get(level.upper(), "·")
+        ts    = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        self.state.event_log.append(
+            f"[{C_DIM}]{ts}[/]  [{color}]{tag}[/]  {msg}"
+        )
+
+    async def run_renderer(self) -> None:
+        # Nothing to render — just keep the task alive until is_running goes False.
+        while self.state.is_running:
+            await asyncio.sleep(1.0)

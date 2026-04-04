@@ -501,14 +501,6 @@ async def match_markets(state: SportsScanState) -> dict[str, Any]:
         )
         return {"matched_pairs": []}
 
-    # ── Sample log — remove after matching is validated ──────────────────────
-    if state.global_sports and state.us_events:
-        logger.debug(
-            "SPORTS match sample | global: {} | us: {}",
-            [m.question for m in state.global_sports[:10]],
-            [(m.get("title",""), m.get("slug","")) for m in state.us_events[:10]],
-        )
-
     pairs: list[MatchedPair] = []
 
     for global_mkt in state.global_sports:
@@ -526,6 +518,10 @@ async def match_markets(state: SportsScanState) -> dict[str, Any]:
         us_title  = us_mkt.get("title", us_mkt.get("name", ""))
         us_status = us_mkt.get("status", "status_scheduled")
 
+        # Capture ESPN game ID now so live nodes can use it as a join key
+        # without re-doing team-name matching on every scan.
+        # today_games not yet available at match_markets time — ID is populated
+        # in run_sports_strategy and live_sports_graph after ESPN fetch.
         pairs.append(MatchedPair(
             global_market=global_mkt,
             us_slug=us_slug,
@@ -654,10 +650,13 @@ async def run_sports_strategy(state: SportsScanState) -> dict[str, Any]:
                 odds_by_game[pair.us_slug] = odds
                 break
 
-    # Convert MatchedPair → MatchedGame, enriching with ESPN status/teams
+    # Convert MatchedPair → MatchedGame, enriching with ESPN status/teams.
+    # Also backfill espn_game_id on the pair so live nodes have the join key.
     matched_games: list[MatchedGame] = []
     for pair in state.matched_pairs:
         espn_game = _find_espn_game(pair.global_market.question, state.today_games)
+        if espn_game and not pair.espn_game_id:
+            pair.espn_game_id = espn_game.game_id
         matched_games.append(MatchedGame(
             global_market=pair.global_market,
             us_slug=pair.us_slug,

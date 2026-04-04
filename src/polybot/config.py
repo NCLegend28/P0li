@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     sports_min_edge:       float = Field(default=0.05)   # 5¢ min for sports
     sports_max_daily_loss: float = Field(default=50.0)
 
+    # ── Live in-game trading ──────────────────────────────────────────────────
+    live_sports_enabled:               bool  = Field(default=False)
+    live_sports_min_edge:              float = Field(default=0.08)
+    live_sports_min_seconds_remaining: float = Field(default=120.0)   # 2-min floor
+    live_sports_blowout_margin:        float = Field(default=0.85)    # skip/exit above this
+    live_sports_kelly_fraction:        float = Field(default=0.15)
+    live_sports_max_position_usd:      float = Field(default=8.0)
+    espn_live_poll_interval:           int   = Field(default=30)      # cache TTL in seconds
+
     # ── The Odds API (sports confirmation — Layer 2) ───────────────────────────
     odds_api_key: str = Field(default="")
 
@@ -72,6 +81,17 @@ class Settings(BaseSettings):
     log_file_path:    str = Field(default="data/trades/bot.log")
     weather_log_path: str = Field(default="data/trades/weather.log")
     sports_log_path:  str = Field(default="data/trades/sports.log")
+
+    # ── Headless / service mode ───────────────────────────────────────────────
+    # Set HEADLESS=true on VPS to skip the Rich terminal renderer.
+    # The scanner still runs and publishes state over WebSocket.
+    headless: bool = Field(default=False)
+
+    # ── Dashboard service ─────────────────────────────────────────────────────
+    # URL the dashboard service uses to consume state from the weather bot.
+    scanner_ws_url:   str = Field(default="ws://localhost:8765/ws")
+    dashboard_host:   str = Field(default="0.0.0.0")
+    dashboard_port:   int = Field(default=8766)
 
     # ── Logging ───────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO")

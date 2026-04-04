@@ -29,7 +29,7 @@ else:
 
 from loguru import logger
 
-from polybot.models import PaperTrade, Side
+from polybot.models import LiveGameContext, PaperTrade, Side
 
 
 class ExitReason(StrEnum):
@@ -38,6 +38,9 @@ class ExitReason(StrEnum):
     MARKET_CLOSED  = "market_closed"
     TIME_STOP      = "time_stop"        # market closing in < 30 min
     PREGAME_LOCK   = "pregame_lock"     # sports: exit before game tip-off
+    GAME_ENDED     = "game_ended"       # live: final whistle — exit before Polymarket resolves
+    BLOWOUT_STOP   = "blowout_stop"     # live: model prob exceeded blowout margin, edge gone
+    SCORE_REVERSAL = "score_reversal"   # live: market moved against us AND model confirms
 
 
 @dataclass
@@ -171,5 +174,94 @@ def compute_exit_signals(
             f"entry={trade.entry_price:.3f} now={current_side_price:.3f} "
             f"target={target:.3f} {hours_left:.1f}h left"
         )
+
+    return signals
+
+
+def compute_live_exit_signals(
+    open_trades:     list[PaperTrade],
+    current_prices:  dict[str, float],          # market_id → current YES price
+    live_contexts:   dict[str, LiveGameContext], # market_id → live game state
+    model_probs:     dict[str, float],           # market_id → current model win prob
+    *,
+    blowout_margin:        float = 0.85,   # exit if model prob for our side exceeds this
+    reversal_price_drop:   float = 0.10,   # price moved this far against entry
+    reversal_model_cutoff: float = 0.45,   # AND model prob for our side fell below this
+) -> list[ExitSignal]:
+    """
+    Exit logic specific to live in-game positions.
+
+    Runs in addition to (not instead of) compute_exit_signals for live trades.
+    Three new triggers:
+      GAME_ENDED     — ESPN reports the game is final; exit before Polymarket resolves
+      BLOWOUT_STOP   — model says the game is effectively decided (prob > blowout_margin)
+      SCORE_REVERSAL — market moved against us AND model confirms the reversal
+    """
+    signals: list[ExitSignal] = []
+
+    for trade in open_trades:
+        current_yes   = current_prices.get(trade.market_id)
+        live_ctx      = live_contexts.get(trade.market_id)
+        model_prob    = model_probs.get(trade.market_id)
+
+        if current_yes is None or live_ctx is None:
+            continue
+
+        current_side_price = current_yes if trade.side == Side.YES else (1.0 - current_yes)
+        model_side_prob    = model_prob if (trade.side == Side.YES or model_prob is None) else (1.0 - model_prob)
+
+        # ── Game ended: exit before Polymarket resolution delay ───────────────
+        if live_ctx.is_final:
+            signals.append(ExitSignal(
+                trade_id      = trade.id,
+                reason        = ExitReason.GAME_ENDED,
+                exit_price    = current_side_price,
+                current_price = current_side_price,
+                note          = f"Game final: {live_ctx.home_team} {live_ctx.home_score}–{live_ctx.away_score} {live_ctx.away_team}",
+            ))
+            logger.info(
+                "GAME ENDED {} | {} {}–{} {} | exit={:.3f}",
+                trade.question[:40],
+                live_ctx.home_team, live_ctx.home_score,
+                live_ctx.away_score, live_ctx.away_team,
+                current_side_price,
+            )
+            continue
+
+        # ── Blowout stop: model says game is decided ──────────────────────────
+        if model_side_prob is not None and model_side_prob > blowout_margin:
+            # Our side is now a heavy favourite — the edge has collapsed because
+            # the market will catch up. Exit at the inflated price.
+            signals.append(ExitSignal(
+                trade_id      = trade.id,
+                reason        = ExitReason.BLOWOUT_STOP,
+                exit_price    = current_side_price,
+                current_price = current_side_price,
+                note          = f"Blowout: model_prob={model_side_prob:.2f} > {blowout_margin}",
+            ))
+            logger.info(
+                "BLOWOUT STOP {} | model_prob={:.2f} exit={:.3f}",
+                trade.question[:40], model_side_prob, current_side_price,
+            )
+            continue
+
+        # ── Score reversal: price dropped AND model confirms ──────────────────
+        price_dropped  = current_side_price < (trade.entry_price - reversal_price_drop)
+        model_confirms = model_side_prob is not None and model_side_prob < reversal_model_cutoff
+        if price_dropped and model_confirms:
+            signals.append(ExitSignal(
+                trade_id      = trade.id,
+                reason        = ExitReason.SCORE_REVERSAL,
+                exit_price    = current_side_price,
+                current_price = current_side_price,
+                note          = (
+                    f"Reversal: entry={trade.entry_price:.3f} now={current_side_price:.3f} "
+                    f"model={model_side_prob:.2f}"
+                ),
+            ))
+            logger.info(
+                "SCORE REVERSAL {} | entry={:.3f} now={:.3f} model={:.2f}",
+                trade.question[:40], trade.entry_price, current_side_price, model_side_prob,
+            )
 
     return signals

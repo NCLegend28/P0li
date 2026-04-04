@@ -166,13 +166,6 @@ class SportsStrategy:
         global_yes = global_market.yes_price
         hours_left = global_market.hours_until_close
 
-        # ── Pre-game lock: don't enter within 2h of game time ─────────────────
-        if hours_left < 2.0:
-            logger.debug(
-                "Pre-game lock: {:.1f}h to close for {}", hours_left, us_slug
-            )
-            return None
-
         # ── Primary edge (Layer 1 vs Layer 3) ─────────────────────────────────
         sportsbook_prob: float | None = None
         if odds_data is not None:
@@ -306,7 +299,13 @@ def evaluate_sports_markets(
     opportunities: list[Opportunity] = []
 
     for pair in matched_pairs:
-        # ── Status gate: only trade pre-game markets ──────────────────────────
+        # ── Status gate: route by game state ──────────────────────────────────
+        # status_scheduled  → pre-game arb (this strategy)
+        # status_in_progress → live model strategy (live_sports.py)
+        # status_final      → skip (game over)
+        if pair.status == "status_in_progress":
+            logger.debug("Live game {} deferred to live strategy", pair.us_slug)
+            continue
         if pair.status != "status_scheduled":
             logger.debug("Skipping {} — status={}", pair.us_slug, pair.status)
             continue
