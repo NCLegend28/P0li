@@ -94,7 +94,7 @@ def _serialise(state: "DashboardState") -> dict:
                 "size":     t.size_usd,
                 "opened":   t.opened_at.isoformat() if t.opened_at else "",
                 "openedTs": int(t.opened_at.timestamp()) if t.opened_at else 0,
-                "live":     bool(t.clob_order_id),
+                "live":     bool(t.clob_order_id or t.live_order_id),
                 "platform": t.live_platform or "",
             }
             for t in trader.positions.values()
@@ -108,15 +108,15 @@ def _serialise(state: "DashboardState") -> dict:
                 "exit":     t.exit_price or 0.0,
                 "pnl":      t.pnl_usd,
                 "reason":   "",
-                "live":     bool(t.clob_order_id),
+                "live":     bool(t.clob_order_id or t.live_order_id),
                 "platform": t.live_platform or "",
             }
             for t in reversed(closed)
         ]
 
         # Live-specific stats (trades that had a real CLOB order placed)
-        live_closed   = [t for t in closed if t.clob_order_id]
-        live_open     = [t for t in trader.positions.values() if t.clob_order_id]
+        live_closed   = [t for t in closed if t.clob_order_id or t.live_order_id]
+        live_open     = [t for t in trader.positions.values() if t.clob_order_id or t.live_order_id]
         live_open_val = sum(t.size_usd for t in live_open)
         live_nav      = state.live_balance + live_open_val
         live_pnl      = sum(t.pnl_usd for t in live_closed)
@@ -688,8 +688,8 @@ function modPositions(S,fm){
   let positions=S.positions||[];
   const isSpt=currentMarket==='spt';
   if(isLive()) positions=positions.filter(p=>p.live);
-  else if(isSpt) positions=positions.filter(p=>p.platform==='polymarket_us');
-  else positions=positions.filter(p=>isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q));
+  else if(isSpt) positions=positions.filter(p=>!p.live&&p.platform==='polymarket_us');
+  else positions=positions.filter(p=>!p.live&&(isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q)));
   const cf=isSpt?condenseGame:isCrypto?condenseCrypto:condense;
   if(!positions.length)return`<div style="color:${C.dim};text-align:center;padding:20px 0">no open positions</div>`;
   const hdr=`<div style="display:grid;grid-template-columns:90px 1fr 42px 54px 54px 84px 46px;gap:0 6px;margin-bottom:4px">
@@ -900,7 +900,7 @@ function renderZone(zoneId,S,fm){
   const counts={
     positions:isLive()
       ?(S.positions||[]).filter(p=>p.live).length
-      :(S.positions||[]).filter(p=>isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q)).length,
+      :(S.positions||[]).filter(p=>!p.live&&(isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q))).length,
     opportunities:(S.opps||[]).filter(o=>isCrypto?o.strat!=='WX':o.strat==='WX').length,
     wxfeed:isCrypto?(S.cryptoFeed||[]).length:(S.feed||[]).length,
     sptfeed:(S.sptFeed||[]).length,
