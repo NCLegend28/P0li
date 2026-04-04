@@ -534,7 +534,7 @@ def _pnl_panel(state: DashboardState, w: int, h: int) -> Panel:
 
     if state.live_mode:
         g.add_row(f"[{C_ORANGE}]LIVE USDC[/]", f"[{C_ORANGE}]${state.live_balance:,.2f}[/]")
-        g.add_row(f"[{C_DIM}]──── PAPER ────[/]", "")
+        g.add_row(f"[{C_DIM}]──── LIVE ────[/]", "")
         g.add_row("BALANCE",   f"[{C_WHITE}]${trader.balance:,.2f}[/]")
     else:
         g.add_row("BALANCE",   f"[{C_WHITE}]${trader.balance:,.2f}[/]")

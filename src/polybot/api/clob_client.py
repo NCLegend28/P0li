@@ -174,6 +174,32 @@ class ClobClient:
             logger.debug(f"cancel_order {order_id}: {e}")
             return False
 
+    def sell_order(self, token_id: str, price: float, shares: float) -> str | None:
+        """
+        Sell (exit) a position by placing a SELL limit order.
+        Takes shares directly since the position size is already known.
+        Never raises.
+        """
+        if not self.check_daily_loss_limit():
+            return None
+        try:
+            order_args = OrderArgs(
+                token_id = token_id,
+                price    = price,
+                size     = round(shares, 4),
+                side     = SELL,
+            )
+            response = self._client.create_and_post_order(order_args)
+            order_id = response.get("orderID")
+            logger.info(
+                f"LIVE SELL ORDER  token={token_id[:12]}...  "
+                f"price={price:.3f}  shares={shares:.4f}  order_id={order_id}"
+            )
+            return order_id
+        except Exception as e:
+            logger.error(f"sell_order failed — token={token_id[:12]}: {e}")
+            return None
+
     # ── Order status ──────────────────────────────────────────────────────────
 
     def get_order_status(self, order_id: str) -> str | None:

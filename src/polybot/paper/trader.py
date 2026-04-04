@@ -38,6 +38,7 @@ class PaperTrader:
         self.closed_trades: list[PaperTrade] = []
         self._clob    = None   # global CLOB client — set by cli.py when LIVE_TRADING=true
         self._us_clob = None   # US platform client — set by cli.py when US keys configured
+        self._live_starting_balance: float | None = None
 
         TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._load_history()
@@ -55,7 +56,8 @@ class PaperTrader:
     def set_clob_client(self, clob) -> None:
         """Wire in the global CLOB client. Called by cli.py at startup."""
         self._clob = clob
-        logger.info(f"Live trading enabled (global) — balance=${clob.get_balance():.2f}")
+        self._live_starting_balance = clob.get_balance()
+        logger.info(f"Live trading enabled (global) — balance=${self._live_starting_balance:.2f}")
 
     def set_us_client(self, us_client) -> None:
         """Wire in the Polymarket US client. Called by cli.py at startup."""
@@ -80,7 +82,7 @@ class PaperTrader:
                     self.closed_trades.append(trade)
 
         # Recompute balance from closed trades
-        starting = settings.paper_starting_balance
+        starting = self._starting_balance()
         total_pnl = sum(t.pnl_usd for t in self.closed_trades)
         open_capital = sum(t.size_usd for t in self.positions.values())
         self.balance = starting + total_pnl - open_capital
@@ -106,7 +108,8 @@ class PaperTrader:
             logger.debug(f"Already have position for opportunity {opp.id}")
             return None
 
-        size_usd = min(settings.paper_max_position_usd, self.balance * 0.1)
+        max_pos = settings.live_max_position_usd if (self.live_mode or self.us_live_mode) else settings.paper_max_position_usd
+        size_usd = min(max_pos, self.balance * 0.1)
         if size_usd < 1.0:
             logger.warning("Balance too low to open new position")
             return None
@@ -139,7 +142,7 @@ class PaperTrader:
                     logger.warning("US live order FAILED for {} — skipping", opp.market.question[:45])
                     return None
                 order_id = order.get("id")
-                trade = trade.model_copy(update={"live_order_id": order_id})
+                trade = trade.model_copy(update={"live_order_id": order_id, "us_market_slug": opp.us_market_slug})
                 logger.success(
                     "LIVE ORDER PLACED (US) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
                     trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
@@ -159,7 +162,7 @@ class PaperTrader:
                 if not order_id:
                     logger.warning("Global CLOB order FAILED for {} — skipping", opp.market.question[:45])
                     return None
-                trade = trade.model_copy(update={"clob_order_id": order_id})
+                trade = trade.model_copy(update={"clob_order_id": order_id, "clob_token_id": token_id})
                 logger.success(
                     "LIVE ORDER PLACED (global) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
                     trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
@@ -215,15 +218,15 @@ class PaperTrader:
             f"@ {exit_price:.3f} | PnL=${trade.pnl_usd:+.2f} ({trade.pnl_pct:+.1f}%)"
         )
 
-        # ── Live execution — cancel / record loss ─────────────────────────────
+        # ── Live execution — place sell / close orders ────────────────────────
         if trade.live_platform == "polymarket_us" and self.us_live_mode:
-            if trade.live_order_id:
-                self._us_clob.cancel_order(trade.live_order_id)
+            if trade.us_market_slug:
+                self._us_clob.close_position(trade.us_market_slug)
             if trade.pnl_usd < 0:
                 self._us_clob.record_loss(abs(trade.pnl_usd))
 
-        elif self.live_mode and trade.clob_order_id:
-            self._clob.cancel_order(trade.clob_order_id)
+        elif self.live_mode and trade.clob_token_id:
+            self._clob.sell_order(trade.clob_token_id, exit_price, trade.shares)
             if trade.pnl_usd < 0:
                 self._clob.record_loss(abs(trade.pnl_usd))
 
@@ -244,6 +247,8 @@ class PaperTrader:
     # ─── Stats & display ──────────────────────────────────────────────────────
 
     def _starting_balance(self) -> float:
+        if self.live_mode and self._live_starting_balance is not None:
+            return self._live_starting_balance
         return settings.paper_starting_balance
 
     def total_pnl(self) -> float:
@@ -262,7 +267,7 @@ class PaperTrader:
         console.rule("[bold cyan]📊 Paper Trading Dashboard")
 
         # Summary stats
-        starting = settings.paper_starting_balance
+        starting = self._starting_balance()
         nav = self.balance + sum(t.size_usd for t in self.positions.values())
         pnl = nav - starting
 

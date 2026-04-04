@@ -150,6 +150,8 @@ class PaperTrade(BaseModel):
     clob_order_id:    str   | None    = None   # live order ID (global CLOB)
     live_order_id:    str   | None    = None   # live order ID (US platform)
     live_platform:    str   | None    = None   # "polymarket_us" or "polymarket_global"
+    clob_token_id:    str   | None    = None   # YES/NO token bought on global CLOB
+    us_market_slug:   str   | None    = None   # US platform market slug for close_position
 
     @computed_field
     @property

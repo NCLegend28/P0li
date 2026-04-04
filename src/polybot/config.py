@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     wallet_address:       str   = Field(default="")   # hot wallet EOA address
     poly_proxy_address:   str   = Field(default="")   # Polymarket proxy wallet (holds USDC)
     max_daily_loss_usd:   float = Field(default=50.0)
+    live_max_position_usd: float = Field(default=50.0)
     poly_key_id:          str   = Field(default="")
     poly_secret_key:      str   = Field(default="")
     
