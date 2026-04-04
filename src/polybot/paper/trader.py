@@ -111,11 +111,66 @@ class PaperTrader:
             logger.warning("Balance too low to open new position")
             return None
 
-        shares = size_usd / opp.market_price
-
+        shares   = size_usd / opp.market_price
         is_sports = bool(opp.us_market_slug)
-        live_platform = "polymarket_us" if is_sports else "polymarket_global"
 
+        # ── Live mode — only execute real orders, no paper simulation ─────────
+        if self.live_mode or self.us_live_mode:
+            trade = PaperTrade(
+                opportunity_id = opp.id,
+                market_id      = opp.market.id,
+                question       = opp.market.question,
+                side           = opp.side,
+                entry_price    = opp.market_price,
+                size_usd       = size_usd,
+                shares         = shares,
+                live_platform  = "polymarket_us" if is_sports else "polymarket_global",
+            )
+
+            if is_sports and self.us_live_mode:
+                quantity = max(1, int(size_usd / opp.market_price))
+                order = self._us_clob.place_order(
+                    market_slug = opp.us_market_slug,
+                    side        = str(opp.side),
+                    price       = opp.market_price,
+                    quantity    = quantity,
+                )
+                if not order:
+                    logger.warning("US live order FAILED for {} — skipping", opp.market.question[:45])
+                    return None
+                order_id = order.get("id")
+                trade = trade.model_copy(update={"live_order_id": order_id})
+                logger.success(
+                    "LIVE ORDER PLACED (US) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
+                    trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
+                )
+
+            elif not is_sports and self.live_mode:
+                token_id = opp.clob_token_id
+                if not token_id:
+                    logger.warning("No CLOB token ID for {} — skipping", opp.market.question[:45])
+                    return None
+                order_id = self._clob.place_order(
+                    token_id = token_id,
+                    side     = str(opp.side),
+                    price    = opp.market_price,
+                    size_usd = size_usd,
+                )
+                if not order_id:
+                    logger.warning("Global CLOB order FAILED for {} — skipping", opp.market.question[:45])
+                    return None
+                trade = trade.model_copy(update={"clob_order_id": order_id})
+                logger.success(
+                    "LIVE ORDER PLACED (global) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
+                    trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
+                )
+
+            # Only track position after confirmed live fill
+            self.positions[opp.id] = trade
+            self._append_trade(trade)
+            return trade
+
+        # ── Paper mode ────────────────────────────────────────────────────────
         trade = PaperTrade(
             opportunity_id = opp.id,
             market_id      = opp.market.id,
@@ -124,7 +179,6 @@ class PaperTrader:
             entry_price    = opp.market_price,
             size_usd       = size_usd,
             shares         = shares,
-            live_platform  = live_platform if (self.live_mode or self.us_live_mode) else None,
         )
 
         self.positions[opp.id] = trade
@@ -136,63 +190,6 @@ class PaperTrader:
             f"@ {trade.entry_price:.3f} | ${size_usd:.2f} | "
             f"opp_id={opp.id}"
         )
-
-        # ── Live execution — US platform (sports) ─────────────────────────────
-        if is_sports and self.us_live_mode:
-            quantity = max(1, int(size_usd / opp.market_price))
-            order = self._us_clob.place_order(
-                market_slug = opp.us_market_slug,
-                side        = str(opp.side),
-                price       = opp.market_price,
-                quantity    = quantity,
-            )
-            if order:
-                order_id = order.get("id")
-                trade = trade.model_copy(update={
-                    "live_order_id": order_id,
-                    "live_platform": "polymarket_us",
-                })
-                self.positions[opp.id] = trade
-                self._append_trade(trade)
-                logger.success(
-                    "LIVE ORDER PLACED (US) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
-                    trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
-                )
-            else:
-                logger.warning(
-                    "US live order FAILED for {} — paper trade kept",
-                    opp.market.question[:45],
-                )
-
-        # ── Live execution — global CLOB (weather/politics/crypto) ───────────
-        elif not is_sports and self.live_mode:
-            token_id = opp.clob_token_id
-            if token_id:
-                order_id = self._clob.place_order(
-                    token_id = token_id,
-                    side     = str(opp.side),
-                    price    = opp.market_price,
-                    size_usd = size_usd,
-                )
-                if order_id:
-                    trade = trade.model_copy(update={"clob_order_id": order_id})
-                    self.positions[opp.id] = trade
-                    self._append_trade(trade)
-                    logger.success(
-                        "LIVE ORDER PLACED (global) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
-                        trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
-                    )
-                else:
-                    logger.warning(
-                        "Global CLOB order FAILED for {} — paper trade kept",
-                        opp.market.question[:45],
-                    )
-            else:
-                logger.warning(
-                    "No CLOB token ID for {} — skipping live order",
-                    opp.market.question[:45],
-                )
-
         return trade
 
     def close_position(self, opportunity_id: str, exit_price: float) -> PaperTrade:
@@ -204,8 +201,11 @@ class PaperTrader:
             "closed_at":  datetime.now(timezone.utc),
         })
 
-        proceeds = exit_price * trade.shares
-        self.balance += proceeds
+        # Only adjust paper balance in paper mode — live balance is synced from CLOB
+        if not (self.live_mode or self.us_live_mode):
+            proceeds = exit_price * trade.shares
+            self.balance += proceeds
+
         self.closed_trades.append(trade)
         self._append_trade(trade)
 
