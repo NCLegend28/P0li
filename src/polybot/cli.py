@@ -483,7 +483,7 @@ async def main() -> None:
             f"Config: interval=[cyan]{settings.scan_interval_seconds}s[/]  "
             f"min_liq=[cyan]${settings.min_liquidity_usd:.0f}[/]  "
             f"min_edge=[cyan]{settings.min_edge_threshold:.0%}[/]  "
-            f"max_pos=[cyan]${settings.paper_max_position_usd:.0f}[/]",
+            f"max_pos=[cyan]${settings.live_max_position_usd if settings.live_trading else settings.paper_max_position_usd:.0f}[/]",
             "INFO",
         )
 

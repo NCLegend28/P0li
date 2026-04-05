@@ -33,7 +33,7 @@ services:
     restart: unless-stopped
     env_file: .env.dashboard
     ports:
-      - "8766:8766"
+      - "127.0.0.1:8766:8766"
     depends_on:
       weather-bot:
         condition: service_healthy

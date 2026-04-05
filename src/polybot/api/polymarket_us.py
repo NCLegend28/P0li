@@ -90,9 +90,18 @@ class PolymarketUSClient:
 
     # ── Account (authenticated) ───────────────────────────────────────────────
 
-    def get_balance(self) -> dict[str, Any]:
-        """Fetch account balances."""
-        return self._client.account.balances()
+    def get_balance(self) -> float:
+        """Fetch USD buying power. Returns 0.0 on error."""
+        try:
+            resp = self._client.account.balances()
+            balances = resp.get("balances", []) if isinstance(resp, dict) else resp
+            for entry in balances:
+                if isinstance(entry, dict) and entry.get("currency") == "USD":
+                    return float(entry.get("buyingPower", entry.get("currentBalance", 0)))
+            return 0.0
+        except Exception as e:
+            logger.error("US get_balance failed: {}", e)
+            return 0.0
 
     def get_positions(self) -> dict[str, Any]:
         """Fetch open positions."""
