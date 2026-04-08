@@ -316,15 +316,20 @@ async def sports_scan_loop(
 
         duration   = round(time.monotonic() - t0, 1)
         opps       = _extract(result, "opportunities", [])
+        us_opps    = _extract(result, "us_opportunities", [])  # US direct trading
+        delay_opps = _extract(result, "delay_opportunities", [])  # Delay arbitrage
         exits      = _extract(result, "exit_signals",  [])
         matched    = _extract(result, "matched_pairs", [])
+
+        # Combine all opportunity types for execution
+        all_opps = opps + us_opps + delay_opps
 
         # ── Update sports dashboard state ──────────────────────────────────────
         ds.sports_scan_number   = scan_n
         ds.sports_last_scan_at  = datetime.now(timezone.utc)
         ds.sports_scan_duration = duration
         ds.sports_matched       = len(matched)
-        ds.sports_opportunities = opps
+        ds.sports_opportunities = all_opps  # Combined for display
 
         # Build sports feed: all matched pairs sorted by abs(edge), largest first
         ds.sports_feed = sorted(
@@ -354,10 +359,11 @@ async def sports_scan_loop(
             else:
                 row.setdefault("is_opportunity", False)
 
-        if matched or opps:
+        if matched or all_opps:
             dash.log(
                 f"[SPORTS] #{scan_n} — "
-                f"[cyan]{len(matched)}[/] matched → [yellow]{len(opps)}[/] opps "
+                f"[cyan]{len(matched)}[/] matched → [yellow]{len(all_opps)}[/] opps "
+                f"([green]{len(opps)}[/] arb + [blue]{len(us_opps)}[/] direct + [magenta]{len(delay_opps)}[/] delay) "
                 f"| [dim]{duration}s[/]",
                 "INFO",
             )
@@ -385,15 +391,22 @@ async def sports_scan_loop(
                 await alerter.alert_trade_closed(closed, signal.reason)
 
         # ── Open new sports positions ──────────────────────────────────────────
-        for opp in opps:
+        for opp in all_opps:
             already = any(t.market_id == opp.market.id for t in trader.positions.values())
             if already:
                 continue
             trade = trader.open_position(opp)
             if trade:
                 ds.daily_trades_opened += 1
+                # Determine opportunity type for logging
+                if opp.id.startswith("delay_arb_"):
+                    opp_type = "DELAY ARB"
+                elif opp.id.startswith("us_direct_"):
+                    opp_type = "US DIRECT"
+                else:
+                    opp_type = "SPORTS ARB"
                 dash.log(
-                    f"[SPORTS OPEN] [cyan]{trade.id}[/]  "
+                    f"[{opp_type}] [cyan]{trade.id}[/]  "
                     f"[{'green' if trade.side == 'YES' else 'red'}]{trade.side}[/] "
                     f"@ [yellow]{trade.entry_price:.3f}[/]  "
                     f"edge=[cyan]{opp.edge_pct}[/]  "

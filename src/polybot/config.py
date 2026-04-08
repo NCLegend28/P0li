@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # ── The Odds API (sports confirmation — Layer 2) ───────────────────────────
     odds_api_key: str = Field(default="")
 
+    # ── Delay Arbitrage ─────────────────────────────────────────────────────────
+    # Gated by default — enable only after testing. Safe rollout toggle.
+    delay_arb_enabled: bool = Field(default=False)
+    delay_arb_cooldown_minutes: float = Field(default=30.0)
+
     # ── Paths ─────────────────────────────────────────────────────────────────
     trade_log_path:   str = Field(default="data/trades/paper_trades.jsonl")
     log_file_path:    str = Field(default="data/trades/bot.log")

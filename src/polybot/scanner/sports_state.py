@@ -67,6 +67,8 @@ class SportsScanState(BaseModel):
 
     # ── Strategy output ───────────────────────────────────────────────────────
     opportunities: list[Opportunity] = Field(default_factory=list)
+    us_opportunities: list[Opportunity] = Field(default_factory=list)  # US direct trading
+    delay_opportunities: list[Opportunity] = Field(default_factory=list)  # Delay arbitrage
     exit_signals: list[ExitSignal] = Field(default_factory=list)
 
     # ── Live in-game state + output ───────────────────────────────────────────

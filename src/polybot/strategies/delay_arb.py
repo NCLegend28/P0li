@@ -23,7 +23,7 @@ opportunities to avoid duplicate trades.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from collections import defaultdict
 
@@ -270,5 +270,3 @@ to Polymarket US yet. Generates signals during the delay window.
             del self._state[slug]
 
 
-# Import needed for type hints
-from datetime import timedelta

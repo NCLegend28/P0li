@@ -43,6 +43,8 @@ from polybot.models import Market, MarketCategory, TradeStatus
 from polybot.scanner.sports_state import MatchedPair, SportsScanState
 from polybot.strategies.exit import compute_exit_signals
 from polybot.strategies.sports import evaluate_sports_markets, MatchedGame
+from polybot.strategies.us_direct import USDirectStrategy, USEvent
+from polybot.strategies.delay_arb import DelayArbitrageStrategy
 
 # Sports leagues to scan on the global Gamma API
 _SPORTS_KEYWORDS = ["NBA", "NFL", "MLB", "NHL", "FIFA", "UFC",
@@ -52,7 +54,7 @@ _SPORTS_KEYWORDS = ["NBA", "NFL", "MLB", "NHL", "FIFA", "UFC",
 # 0.50 with token-overlap scoring; revisit after seeing real sample text.
 # (Was 0.60 with a hard team-token gate — gate caused 0 matches due to
 #  text-format differences between Gamma questions and US slugs/titles.)
-_MIN_MATCH_SCORE = 0.50
+_MIN_MATCH_SCORE = 0.30
 
 # ESPN game status → MatchedGame status string
 _ESPN_STATUS: dict[str, str] = {
@@ -756,34 +758,121 @@ async def monitor_sports_positions(state: SportsScanState) -> dict[str, Any]:
     if signals:
         logger.info("SPORTS: {} exit signals generated", len(signals))
 
-    return {"exit_signals": signals}
+# ─── Node: run_us_direct_strategy ───────────────────────────────────────────
 
-
-# ─── Graph assembly ───────────────────────────────────────────────────────────
+async def run_us_direct_strategy(state: SportsScanState) -> dict[str, Any]:
+    """
+    Evaluate US-only markets for direct trading opportunities.
+    
+    This runs in parallel with cross-platform arbitrage and trades
+    purely on US Polymarket vs sportsbook odds (no global CLOB needed).
+    """
+    if not state.us_events:
+        logger.debug("US direct: no US events available")
+        return {"us_opportunities": [], "delay_opportunities": []}
+    
+    # Convert US events to USEvent objects
+    us_events: list[USEvent] = []
+    for evt in state.us_events:
+        us_events.append(USEvent(
+            slug=evt.get("slug", ""),
+            title=evt.get("title", ""),
+            yes_price=evt.get("yes_price", 0.5),
+            no_price=evt.get("no_price", 0.5),
+            volume=evt.get("volume", 0),
+            game_start=evt.get("game_start", datetime.now(timezone.utc)),
+            sport=evt.get("sport", ""),
+            home_team=evt.get("home_team", ""),
+            away_team=evt.get("away_team", ""),
+        ))
+    
+    # Build odds lookup
+    odds_by_game: dict = {}
+    for odds in state.odds_data:
+        odds_teams = set(
+            (odds.home_team or "").lower().split() + 
+            (odds.away_team or "").lower().split()
+        )
+        for evt in us_events:
+            evt_teams = set(
+                (evt.home_team or "").lower().split() + 
+                (evt.away_team or "").lower().split()
+            )
+            if odds_teams & evt_teams:
+                odds_by_game[evt.slug] = odds
+                break
+    
+    # Calculate open exposure
+    open_exposure = sum(
+        t.size_usd for t in state.open_positions
+        if t.status == TradeStatus.OPEN and t.live_platform == "polymarket_us"
+    )
+    
+    # Run US direct strategy
+    us_strategy = USDirectStrategy(min_edge=settings.sports_min_edge)
+    us_opportunities = us_strategy.evaluate_batch(
+        us_events=us_events,
+        odds_by_game=odds_by_game,
+        bankroll=settings.paper_starting_balance,
+        open_exposure=open_exposure,
+    )
+    
+    # Run delay arbitrage strategy (independent, filters overlaps)
+    delay_strategy = DelayArbitrageStrategy(
+        min_edge=settings.sports_min_edge * 0.8,  # Slightly lower threshold
+        min_movement=0.03,
+        cooldown_minutes=30.0,
+    )
+    existing_opp_ids = [o.id for o in us_opportunities]
+    delay_opportunities = delay_strategy.evaluate_batch(
+        us_events=us_events,
+        odds_by_game=odds_by_game,
+        existing_opportunities=existing_opp_ids,
+        bankroll=settings.paper_starting_balance,
+        open_exposure=open_exposure,
+    )
+    
+    return {"us_opportunities": us_opportunities, "delay_opportunities": delay_opportunities}
 
 def build_sports_scanner_graph() -> Any:
     """
     Assemble the sports scanner LangGraph pipeline.
 
-    fetch_global_sports → fetch_us_events → match_markets
-      → fetch_odds_and_schedule → run_sports_strategy
-        → monitor_sports_positions → END
+    Two parallel paths after fetching data:
+    
+    Path A (Arbitrage):
+      fetch_global_sports → fetch_us_events → match_markets
+        → fetch_odds_and_schedule → run_sports_strategy
+          → monitor_sports_positions → END
+    
+    Path B (US Direct):
+      fetch_us_events (shared) → fetch_odds_and_schedule (shared)
+        → run_us_direct_strategy → monitor_sports_positions → END
     """
     builder = StateGraph(SportsScanState)
 
+    # Data fetching nodes
     builder.add_node("fetch_global_sports",      fetch_global_sports)
     builder.add_node("fetch_us_events",          fetch_us_events)
     builder.add_node("match_markets",            match_markets)
     builder.add_node("fetch_odds_and_schedule",  fetch_odds_and_schedule)
+    
+    # Strategy nodes
     builder.add_node("run_sports_strategy",      run_sports_strategy)
+    builder.add_node("run_us_direct_strategy",   run_us_direct_strategy)
+    
+    # Position monitoring
     builder.add_node("monitor_sports_positions", monitor_sports_positions)
 
+    # Sequential pipeline: arb strategy runs first, then US direct, then monitor
     builder.set_entry_point("fetch_global_sports")
     builder.add_edge("fetch_global_sports",      "fetch_us_events")
     builder.add_edge("fetch_us_events",          "match_markets")
     builder.add_edge("match_markets",            "fetch_odds_and_schedule")
     builder.add_edge("fetch_odds_and_schedule",  "run_sports_strategy")
-    builder.add_edge("run_sports_strategy",      "monitor_sports_positions")
+    builder.add_edge("run_sports_strategy",      "run_us_direct_strategy")
+    builder.add_edge("run_us_direct_strategy",   "monitor_sports_positions")
+    
     builder.add_edge("monitor_sports_positions", END)
 
     return builder.compile()
