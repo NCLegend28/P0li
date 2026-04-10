@@ -9,7 +9,7 @@ Wraps py-clob-client with:
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timezone
 
 from loguru import logger
 from py_clob_client.client import ClobClient as _ClobClient
@@ -39,7 +39,7 @@ class ClobClient:
             funder         = settings.poly_proxy_address,
         )
         self._daily_loss: float = 0.0
-        self._stats_date: date  = date.today()
+        self._stats_date: date  = date.today(timezone.utc)
         logger.info(
             f"ClobClient ready — proxy={settings.poly_proxy_address[:10]}... "
             f"balance=${self.get_balance():.2f}"
@@ -48,7 +48,7 @@ class ClobClient:
     # ── Daily loss circuit breaker ────────────────────────────────────────────
 
     def _reset_daily_if_needed(self) -> None:
-        today = date.today()
+        today = date.today(timezone.utc)
         if today != self._stats_date:
             self._daily_loss = 0.0
             self._stats_date = today
