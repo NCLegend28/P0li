@@ -57,7 +57,7 @@ def _is_sports(record) -> bool:
 def _configure_logging() -> None:
     logger.remove()
 
-    _fmt = "{time:HH:mm:ss} | {level: <8} | {name} | {message}"
+    _fmt = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name} | {message}"
 
     # Catch-all: everything goes to bot.log
     logger.add(

@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, timezone
+from datetime import date, datetime, timezone
 
 from loguru import logger
 
@@ -55,7 +55,7 @@ def _parse_date(date_str: str) -> str:
         month = _MONTH_MAP.get(m.group(1))
         if month:
             day   = int(m.group(2))
-            today = date.today(timezone.utc)
+            today = datetime.now(timezone.utc).date()
             try:
                 candidate = date(today.year, month, day)
                 if candidate < today:
