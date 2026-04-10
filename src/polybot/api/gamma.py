@@ -20,6 +20,8 @@ from polybot.utils.retry import async_retry
 GAMMA_BASE  = "https://gamma-api.polymarket.com"
 CLOB_BASE   = "https://clob.polymarket.com"
 
+_PAGE_SIZE = 100  # Gamma's effective max per page
+
 # Gamma's tag API is unreliable — detect by question text instead
 _WEATHER_KEYWORDS = (
     "temperature", "°f", "°c", "degrees", "fahrenheit",
@@ -154,47 +156,74 @@ class GammaClient:
     async def fetch_markets(
         self,
         *,
-        limit:           int   = 100,
+        limit:           int   = 500,
         min_liquidity:   float = 500.0,
         category:        MarketCategory | None = None,
         active_only:     bool  = True,
     ) -> list[Market]:
         """
         Fetch open markets from Gamma, filter by liquidity.
-        Gamma paginates in chunks of 100; we fetch until we have enough.
+
+        Paginates sequentially in _PAGE_SIZE chunks until `limit` accepted
+        markets are collected or Gamma returns a short page (end of data).
+        Markets are sorted by volume descending so the highest-liquidity
+        ones always come first.
         """
-        params: dict[str, Any] = {
-            "limit":   limit,
-            "active":  "true" if active_only else "false",
-            "closed":  "false",
-            "order":   "volume",
-            "ascending": "false",
-        }
-
-        if category:
-            params["tag"] = category.value
-
-        logger.debug(f"Gamma fetch → {params}")
-        response = await self._client.get("/markets", params=params)
-        response.raise_for_status()
-
-        raw_markets: list[dict] = response.json()
         markets: list[Market] = []
+        offset = 0
+        total_raw = 0
 
-        for raw in raw_markets:
-            market = _parse_market(raw)
-            if market is None:
-                continue
-            if market.closed or not market.active:
-                continue
-            if market.liquidity_usd < min_liquidity:
-                continue
-            if market.hours_until_close < 1.0:
-                # Skip markets closing in less than 1 hour
-                continue
-            markets.append(market)
+        while len(markets) < limit:
+            params: dict[str, Any] = {
+                "limit":     _PAGE_SIZE,
+                "offset":    offset,
+                "active":    "true" if active_only else "false",
+                "closed":    "false",
+                "order":     "volume",
+                "ascending": "false",
+            }
+            if category:
+                params["tag"] = category.value
 
-        logger.info(f"Gamma returned {len(raw_markets)} raw, {len(markets)} passed filters")
+            logger.debug(f"Gamma fetch → offset={offset} params={params}")
+            response = await self._client.get("/markets", params=params)
+            response.raise_for_status()
+
+            page: list[dict] = response.json()
+            if not page:
+                break
+
+            total_raw += len(page)
+            for raw in page:
+                market = _parse_market(raw)
+                if market is None:
+                    continue
+                if market.closed or not market.active:
+                    continue
+                if market.liquidity_usd < min_liquidity:
+                    continue
+                if market.hours_until_close < 1.0:
+                    continue
+                markets.append(market)
+                if len(markets) >= limit:
+                    break
+
+            logger.debug(
+                f"Gamma page offset={offset}: {len(page)} raw → "
+                f"{len(markets)} accepted so far"
+            )
+
+            if len(page) < _PAGE_SIZE:
+                break  # Short page → end of data
+
+            offset += _PAGE_SIZE
+            await asyncio.sleep(0.1)  # Be polite between pages
+
+        logger.info(
+            f"Gamma sequential fetch: {total_raw} raw across "
+            f"{offset // _PAGE_SIZE + 1} page(s), "
+            f"{len(markets)} passed filters"
+        )
         return markets
 
     async def fetch_weather_markets(self, min_liquidity: float = 200.0) -> list[Market]:
