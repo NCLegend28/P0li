@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 
 import pytest
 
-from polybot.models import Market, Outcome, MarketCategory, PaperTrade, Side, TradeStatus
+from polybot.models import Market, Outcome, MarketCategory, TradeRecord, Side, TradeStatus
 
 
 @pytest.fixture
@@ -25,8 +25,8 @@ def sample_market() -> Market:
 
 
 @pytest.fixture
-def open_trade(sample_market: Market) -> PaperTrade:
-    return PaperTrade(
+def open_trade(sample_market: Market) -> TradeRecord:
+    return TradeRecord(
         opportunity_id="opp-001",
         market_id=sample_market.id,
         question=sample_market.question,

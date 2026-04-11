@@ -21,7 +21,7 @@ Layer assignments:
 Import firewall:
   This file imports gamma.py (Layer 1 reads) and uses AsyncPolymarketUSClient
   (Layer 3 reads). These are separate clients — no orders are ever placed here.
-  Order execution happens in paper/trader.py via PolymarketUSClient (sync).
+  Order execution happens in trading/engine.py via PolymarketUSClient (sync).
 """
 
 from __future__ import annotations
@@ -690,7 +690,7 @@ async def run_sports_strategy(state: SportsScanState) -> dict[str, Any]:
         injuries=state.injuries,
         today_games=state.today_games,
         yesterday_games=state.yesterday_games,
-        bankroll=settings.paper_starting_balance,
+        bankroll=settings.simulated_starting_balance,
         open_exposure=open_exposure,
         min_edge=settings.sports_min_edge,
     )
@@ -715,9 +715,9 @@ async def monitor_sports_positions(state: SportsScanState) -> dict[str, Any]:
     if not state.open_positions:
         return {"exit_signals": []}
 
-    # Key alignment: PaperTrade.market_id == Opportunity.market.id == global_market.id
+    # Key alignment: TradeRecord.market_id == Opportunity.market.id == global_market.id
     # Sports positions use US prices for current value, but are identified by the
-    # global Gamma market ID (which is what the paper trader stores in market_id).
+    # global Gamma market ID (which is what the trading engine stores in market_id).
     current_prices: dict[str, float] = {
         p.global_market.id: p.us_yes_price
         for p in state.matched_pairs
@@ -813,7 +813,7 @@ async def run_us_direct_strategy(state: SportsScanState) -> dict[str, Any]:
     us_opportunities = us_strategy.evaluate_batch(
         us_events=us_events,
         odds_by_game=odds_by_game,
-        bankroll=settings.paper_starting_balance,
+        bankroll=settings.simulated_starting_balance,
         open_exposure=open_exposure,
     )
     
@@ -828,7 +828,7 @@ async def run_us_direct_strategy(state: SportsScanState) -> dict[str, Any]:
         us_events=us_events,
         odds_by_game=odds_by_game,
         existing_opportunities=existing_opp_ids,
-        bankroll=settings.paper_starting_balance,
+        bankroll=settings.simulated_starting_balance,
         open_exposure=open_exposure,
     )
     

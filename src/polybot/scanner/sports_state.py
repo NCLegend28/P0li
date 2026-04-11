@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from polybot.api.espn import Game, InjuryReport
 from polybot.api.odds import GameOdds
-from polybot.models import LiveGameContext, Market, Opportunity, PaperTrade
+from polybot.models import LiveGameContext, Market, Opportunity, TradeRecord
 from polybot.strategies.exit import ExitSignal
 
 
@@ -77,7 +77,7 @@ class SportsScanState(BaseModel):
     live_exit_signals: list[ExitSignal] = Field(default_factory=list)
 
     # ── Injected by CLI before each scan ─────────────────────────────────────
-    open_positions: list[PaperTrade] = Field(default_factory=list)
+    open_positions: list[TradeRecord] = Field(default_factory=list)
 
     # ── Metadata ─────────────────────────────────────────────────────────────
     scan_number: int = 0

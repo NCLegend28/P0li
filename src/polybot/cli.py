@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from polybot.config import settings
-from polybot.paper.trader import PaperTrader
+from polybot.trading.engine import TradingEngine
 from polybot.scanner.graph import build_scanner_graph
 from polybot.scanner.state import ScanState
 from polybot.scanner.sports_graph import build_sports_scanner_graph
@@ -98,7 +98,7 @@ def _extract(result, field: str, default):
 # ─── Scan loop ────────────────────────────────────────────────────────────────
 
 async def scan_loop(
-    trader:    PaperTrader,
+    trader:    TradingEngine,
     dash:      Dashboard,
     ds:        DashboardState,
     bot_state: BotState,
@@ -285,7 +285,7 @@ async def scan_loop(
 # ─── Sports scan loop ─────────────────────────────────────────────────────────
 
 async def sports_scan_loop(
-    trader:    PaperTrader,
+    trader:    TradingEngine,
     dash:      Dashboard,
     ds:        DashboardState,
     bot_state: BotState,
@@ -452,7 +452,7 @@ async def main() -> None:
     from pathlib import Path
     Path("data/trades").mkdir(parents=True, exist_ok=True)
 
-    trader    = PaperTrader()
+    trader    = TradingEngine()
 
     # ── Live execution — global CLOB ──────────────────────────────────────────
     if settings.live_trading:
@@ -496,7 +496,7 @@ async def main() -> None:
             f"Config: interval=[cyan]{settings.scan_interval_seconds}s[/]  "
             f"min_liq=[cyan]${settings.min_liquidity_usd:.0f}[/]  "
             f"min_edge=[cyan]{settings.min_edge_threshold:.0%}[/]  "
-            f"max_pos=[cyan]${settings.live_max_position_usd if settings.live_trading else settings.paper_max_position_usd:.0f}[/]",
+            f"max_pos=[cyan]${settings.live_max_position_usd if settings.live_trading else settings.simulated_max_position_usd:.0f}[/]",
             "INFO",
         )
 

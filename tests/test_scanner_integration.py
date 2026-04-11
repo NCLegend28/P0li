@@ -35,9 +35,9 @@ async def test_scanner_pipeline_empty_markets():
 async def test_scanner_open_positions_flow_through():
     """open_positions injected into ScanState flows to monitor_positions node."""
     from datetime import datetime, timezone, timedelta
-    from polybot.models import Market, Outcome, MarketCategory, PaperTrade, Side, TradeStatus
+    from polybot.models import Market, Outcome, MarketCategory, TradeRecord, Side, TradeStatus
 
-    trade = PaperTrade(
+    trade = TradeRecord(
         opportunity_id="opp-test",
         market_id="mkt-test",
         question="Will the highest temperature in Dallas be between 80-81°F on March 24?",

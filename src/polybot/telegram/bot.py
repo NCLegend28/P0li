@@ -14,7 +14,7 @@ Architecture:
   The bot runs in its own asyncio task via Application.run_polling()
   wrapped in a background task. It communicates with the scan loop
   through a shared BotState object (a simple dataclass with asyncio.Event
-  flags for pause/stop and a reference to the PaperTrader).
+  flags for pause/stop and a reference to the TradingEngine).
 
   The analogy: Telegram is a walkie-talkie clipped to your belt.
   The scan loop runs on the factory floor. You don't walk to the floor
@@ -33,14 +33,14 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 if TYPE_CHECKING:
-    from polybot.paper.trader import PaperTrader
+    from polybot.trading.engine import TradingEngine
 
 
 # ─── Shared state between scan loop and bot ───────────────────────────────────
 
 @dataclass
 class BotState:
-    trader:        "PaperTrader | None" = None
+    trader:        "TradingEngine | None" = None
     paused:        bool                 = False
     stop_event:    asyncio.Event        = field(default_factory=asyncio.Event)
     scan_number:   int                  = 0

@@ -212,7 +212,7 @@ async def run_strategies(state: ScanState) -> dict[str, Any]:
 
 async def monitor_positions(state: ScanState) -> dict[str, Any]:
     """
-    For each open paper trade, check if an exit condition has been met.
+    For each open simulated trade, check if an exit condition has been met.
 
     IMPORTANT: resolved/near-certain markets (price > 0.93 or < 0.07) are
     filtered OUT of state.filtered_markets. Those are exactly the markets

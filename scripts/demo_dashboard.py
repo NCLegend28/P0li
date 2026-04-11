@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 sys.path.insert(0, "src")
 
 from polybot.models import Market, Outcome, Opportunity, Side, MarketCategory
-from polybot.paper.trader import PaperTrader
+from polybot.trading.engine import TradingEngine
 from polybot.ui.dashboard import Dashboard, DashboardState
 
 
@@ -68,7 +68,7 @@ OPPS = [
 ]
 
 
-async def simulate(ds: DashboardState, trader: PaperTrader, dash: Dashboard) -> None:
+async def simulate(ds: DashboardState, trader: TradingEngine, dash: Dashboard) -> None:
     scan = 0
 
     # Pre-open two positions
@@ -159,7 +159,7 @@ async def simulate(ds: DashboardState, trader: PaperTrader, dash: Dashboard) -> 
 
 
 async def main() -> None:
-    trader = PaperTrader()
+    trader = TradingEngine()
     ds     = DashboardState(
         trader        = trader,
         scan_interval = 120,

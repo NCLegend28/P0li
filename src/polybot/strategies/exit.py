@@ -1,7 +1,7 @@
 """
 Exit strategy engine.
 
-Responsible for deciding WHEN to close open paper positions.
+Responsible for deciding WHEN to close open open positions.
 Two triggers:
 
 1. Profit target: exit when market price moves enough in our favour
@@ -29,7 +29,7 @@ else:
 
 from loguru import logger
 
-from polybot.models import LiveGameContext, PaperTrade, Side
+from polybot.models import LiveGameContext, TradeRecord, Side
 
 
 class ExitReason(StrEnum):
@@ -53,7 +53,7 @@ class ExitSignal:
 
 
 def compute_exit_signals(
-    open_trades:    list[PaperTrade],
+    open_trades:    list[TradeRecord],
     current_prices: dict[str, float],    # market_id → current YES price
     hours_to_close: dict[str, float],    # market_id → hours remaining
     *,
@@ -179,7 +179,7 @@ def compute_exit_signals(
 
 
 def compute_live_exit_signals(
-    open_trades:     list[PaperTrade],
+    open_trades:     list[TradeRecord],
     current_prices:  dict[str, float],          # market_id → current YES price
     live_contexts:   dict[str, LiveGameContext], # market_id → live game state
     model_probs:     dict[str, float],           # market_id → current model win prob

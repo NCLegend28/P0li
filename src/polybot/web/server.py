@@ -627,9 +627,9 @@ function condenseGame(q){
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
-// account: 'paper' | 'live'   (top-level — which account to view)
+// account: 'simulated' | 'live'   (top-level — which account to view)
 // market:  'wx' | 'crypto'    (sub-filter within paper view)
-let currentAccount=localStorage.getItem('pb-account')||'paper';
+let currentAccount=localStorage.getItem('pb-account')||'simulated';
 let currentMarket =localStorage.getItem('pb-market') ||'wx';
 
 function showAccount(a){
@@ -939,10 +939,10 @@ function fullRender(S){
       ${S.sportsEnabled&&currentMarket==='spt'?`&nbsp;&#183;&nbsp;<span style="color:#00e5ff">SPT</span>&nbsp;scan&nbsp;<span style="color:${C.cyan}">#${S.sptScanNum}</span>&nbsp;next&nbsp;<span id="hsptcountdown" style="color:${C.cyan}">${S.sptNextIn}</span>s`:''}
     </span>
     <div style="display:flex;gap:5px;margin-left:8px">
-      <button class="tab${currentAccount==='paper'?' active':''}" onclick="showAccount('paper')">&#9672; PAPER</button>
+      <button class="tab${currentAccount==='simulated'?' active':''}" onclick="showAccount('simulated')">&#9672; PAPER</button>
       ${S.liveMode?`<button class="tab${currentAccount==='live'?' active':''}" style="${currentAccount==='live'?'':'color:#ff9a3c;border-color:rgba(255,154,60,.35)'}" onclick="showAccount('live')">&#9672; LIVE</button>`:''}
     </div>
-    ${currentAccount==='paper'?`<div style="display:flex;gap:4px;margin-left:4px">
+    ${currentAccount==='simulated'?`<div style="display:flex;gap:4px;margin-left:4px">
       <button class="tab${currentMarket==='wx'?' active':''}" onclick="showMarket('wx')" style="font-size:9px;padding:2px 7px">WX</button>
       <button class="tab${currentMarket==='crypto'?' active':''}" onclick="showMarket('crypto')" style="font-size:9px;padding:2px 7px">CRYPTO</button>
       ${S.sportsEnabled?`<button class="tab${currentMarket==='spt'?' active':''}" onclick="showMarket('spt')" style="font-size:9px;padding:2px 7px;${currentMarket==='spt'?'':'color:#00e5ff;border-color:rgba(0,229,255,.35)'}">SPT</button>`:''}

@@ -15,9 +15,15 @@ class Settings(BaseSettings):
     min_liquidity_usd:     float = Field(default=500.0)
     min_edge_threshold:    float = Field(default=0.08)
 
-    # ── Paper trading ─────────────────────────────────────────────────────────
-    paper_starting_balance: float = Field(default=1000.0)
-    paper_max_position_usd: float = Field(default=10.0)
+    # ── Simulated trading (paper mode) ─────────────────────────────────────────
+    simulated_starting_balance: float = Field(
+        default=1000.0,
+        validation_alias=AliasChoices("simulated_starting_balance", "paper_starting_balance")
+    )
+    simulated_max_position_usd: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("simulated_max_position_usd", "paper_max_position_usd")
+    )
     max_open_positions:     int   = Field(default=10)
 
     # ── Live execution ────────────────────────────────────────────────────────
@@ -83,7 +89,7 @@ class Settings(BaseSettings):
     delay_arb_cooldown_minutes: float = Field(default=30.0)
 
     # ── Paths ─────────────────────────────────────────────────────────────────
-    trade_log_path:   str = Field(default="data/trades/paper_trades.jsonl")
+    trade_log_path:   str = Field(default="data/trades/trades.jsonl")
     log_file_path:    str = Field(default="data/trades/bot.log")
     weather_log_path: str = Field(default="data/trades/weather.log")
     sports_log_path:  str = Field(default="data/trades/sports.log")

@@ -63,7 +63,7 @@ class TestDelayArbitrageStrategy(unittest.TestCase):
         self.mock_settings.delay_arb_enabled = True
         self.mock_settings.sports_min_edge = 0.05
         self.mock_settings.live_sports_max_position_usd = 8.0
-        self.mock_settings.paper_starting_balance = 1000.0
+        self.mock_settings.simulated_starting_balance = 1000.0
         self.mock_settings.live_trading = True
         self.mock_settings.sports_max_daily_loss = 50.0
 

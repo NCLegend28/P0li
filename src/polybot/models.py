@@ -131,10 +131,10 @@ class LiveGameContext(BaseModel):
         return self.home_score - self.away_score
 
 
-# ─── Paper Trade ──────────────────────────────────────────────────────────────
+# ─── Trade Record ─────────────────────────────────────────────────────────────
 
-class PaperTrade(BaseModel):
-    """A simulated position."""
+class TradeRecord(BaseModel):
+    """A trade record — for both simulated and live trades."""
     id:               str      = Field(default_factory=lambda: secrets.token_hex(6))
     opportunity_id:   str
     market_id:        str

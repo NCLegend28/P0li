@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from polybot.api.coingecko import CoinData
 from polybot.api.openmeteo import CityForecast
-from polybot.models import Market, Opportunity, PaperTrade
+from polybot.models import Market, Opportunity, TradeRecord
 from polybot.strategies.exit import ExitSignal
 
 
@@ -28,7 +28,7 @@ class ScanState(BaseModel):
     exit_signals: list[ExitSignal] = Field(default_factory=list)
 
     # Injected by CLI before each run — open positions for exit monitoring
-    open_positions: list[PaperTrade] = Field(default_factory=list)
+    open_positions: list[TradeRecord] = Field(default_factory=list)
 
     # Built by fetch_forecasts, consumed by run_strategies and monitor_positions
     forecast_cache: dict[str, CityForecast] = Field(default_factory=dict)
