@@ -90,7 +90,6 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "LIMA":          (-12.0464, -77.0428),
     "BOGOTA":        (4.7110,   -74.0721),
     "SANTIAGO":      (-33.4489, -70.6693),
-    "AMSTERDAM":     (52.3676,   4.9041),
     # Cities seen in live Polymarket data
     "MILAN":         (45.4642,   9.1900),
     "KUALA LUMPUR":  (3.1390,  101.6869),
@@ -100,8 +99,7 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "MANILA":        (14.5995, 120.9842),
     "HO CHI MINH":   (10.8231, 106.6297),
     "HANOI":         (21.0278, 105.8342),
-    "CASABLANCA":    (33.5731,  -7.5898),
-        "ADDIS ABABA":   (9.0320,   38.7469),
+    "ADDIS ABABA":   (9.0320,   38.7469),
     # Cities with active Polymarket weather markets
     "SHENZHEN":      (22.5431, 114.0579),
     "CHONGQING":     (29.5630, 106.5516),
@@ -132,9 +130,6 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "SUZHOU":        (31.2989, 120.5853),
     "SHENYANG":      (41.8057, 123.4315),
     "HARBIN":        (45.8038, 126.5350),
-    "KUALA LUMPUR":  (3.1390,  101.6869),
-    "KARACHI":       (24.8607,  67.0011),
-    "LAHORE":        (31.5204,  74.3587),
     "ISLAMABAD":     (33.7294,  73.0931),
     "COLOMBO":       (6.9271,   79.8612),
     "KATHMANDU":     (27.7172,  85.3240),
@@ -155,7 +150,6 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "MUSCAT":        (23.5880,  58.3829),
     "DOHA":          (25.2854,  51.5310),
     "ABU DHABI":     (24.4539,  54.3773),
-    "CASABLANCA":    (33.5731,  -7.5898),
     "TUNIS":         (36.8190,  10.1658),
     "ALGIERS":       (36.7372,   3.0863),
     "TRIPOLI":       (32.9012,  13.1809),
@@ -166,17 +160,13 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "HARARE":        (-17.8252, 31.0335),
     "JOHANNESBURG":  (-26.2041, 28.0473),
     "CAPE TOWN":     (-33.9249, 18.4241),
-    "ACCRA":         (5.6037,   -0.1870),
     "ABUJA":         (9.0765,   7.3986),
     "KINSHASA":      (-4.4419,  15.2663),
     "ANTANANARIVO":  (-18.8792, 47.5079),
     "GUADALAJARA":   (20.6597, -103.3496),
     "MONTERREY":     (25.6866, -100.3161),
-    "BOGOTA":        (4.7110,  -74.0721),
-    "LIMA":          (-12.0464, -77.0428),
     "QUITO":         (-0.1807,  -78.4678),
     "LA PAZ":        (-16.5000, -68.1193),
-    "SANTIAGO":      (-33.4489, -70.6693),
     "MONTEVIDEO":    (-34.9011, -56.1645),
     "ASUNCION":      (-25.2867, -57.6470),
     "CARACAS":       (10.4806,  -66.9036),
@@ -239,37 +229,69 @@ class OpenMeteoClient:
         """
         Fetch daily high/low for a city.
         target_date: ISO date string e.g. '2026-03-24', defaults to today.
+
+        For past dates (more than 2 days ago) uses the Open-Meteo archive API
+        so the backtest gets actual observed temperatures rather than a 7-day
+        forward window that can never reach historical dates.
         """
+        from datetime import date as _date
         key = city_key.upper()
         lat, lon = CITY_COORDS[key]
 
-        params = {
-            "latitude":    lat,
-            "longitude":   lon,
-            "daily":       "temperature_2m_max,temperature_2m_min",
-            "temperature_unit": "celsius",
-            "timezone":    "auto",
-            "forecast_days": 7,
-        }
+        today = _date.today()
 
-        resp = await self._client.get("/forecast", params=params)
-        resp.raise_for_status()
-        raw = resp.json()
-
+        # Determine if we should hit the archive endpoint
+        use_archive = False
         if target_date:
-            # Find the index matching our target date
-            dates = raw["daily"]["time"]
-            if target_date in dates:
-                try:
-                    idx = dates.index(target_date)
-                    raw["daily"]["temperature_2m_max"] = [raw["daily"]["temperature_2m_max"][idx]]
-                    raw["daily"]["temperature_2m_min"] = [raw["daily"]["temperature_2m_min"][idx]]
-                except (ValueError, IndexError) as e:
-                    logger.warning(
-                        f"Date index lookup failed for {target_date!r}: {e}. "
-                        "Falling back to today (index 0)."
-                    )
-            # Else fall through to today (index 0)
+            try:
+                td = _date.fromisoformat(target_date)
+                use_archive = td < today - __import__("datetime").timedelta(days=2)
+            except ValueError:
+                pass
+
+        if use_archive:
+            archive_client = httpx.AsyncClient(
+                base_url = "https://archive-api.open-meteo.com/v1",
+                timeout  = 20.0,
+                headers  = {"Accept": "application/json"},
+            )
+            async with archive_client as ac:
+                resp = await ac.get("/archive", params={
+                    "latitude":         lat,
+                    "longitude":        lon,
+                    "start_date":       target_date,
+                    "end_date":         target_date,
+                    "daily":            "temperature_2m_max,temperature_2m_min",
+                    "temperature_unit": "celsius",
+                    "timezone":         "auto",
+                })
+                resp.raise_for_status()
+                raw = resp.json()
+        else:
+            params: dict = {
+                "latitude":         lat,
+                "longitude":        lon,
+                "daily":            "temperature_2m_max,temperature_2m_min",
+                "temperature_unit": "celsius",
+                "timezone":         "auto",
+                "forecast_days":    7,
+            }
+            resp = await self._client.get("/forecast", params=params)
+            resp.raise_for_status()
+            raw = resp.json()
+
+            if target_date:
+                dates = raw["daily"]["time"]
+                if target_date in dates:
+                    try:
+                        idx = dates.index(target_date)
+                        raw["daily"]["temperature_2m_max"] = [raw["daily"]["temperature_2m_max"][idx]]
+                        raw["daily"]["temperature_2m_min"] = [raw["daily"]["temperature_2m_min"][idx]]
+                    except (ValueError, IndexError) as e:
+                        logger.warning(
+                            f"Date index lookup failed for {target_date!r}: {e}. "
+                            "Falling back to today (index 0)."
+                        )
 
         fc = CityForecast.from_raw(key, lat, lon, raw)
         logger.debug(f"{key}: high={fc.high_temp_c:.1f}°C ({fc.high_temp_f:.1f}°F)")

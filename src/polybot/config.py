@@ -82,6 +82,8 @@ class Settings(BaseSettings):
 
     # ── The Odds API (sports confirmation — Layer 2) ───────────────────────────
     odds_api_key: str = Field(default="")
+    # Free tier: 500 req/month. Default 2h throttle = ≤12 calls/day, ~360/month.
+    odds_poll_interval_seconds: int = Field(default=7200)
 
     # ── Delay Arbitrage ─────────────────────────────────────────────────────────
     # Gated by default — enable only after testing. Safe rollout toggle.

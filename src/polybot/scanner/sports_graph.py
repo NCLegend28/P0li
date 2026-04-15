@@ -35,6 +35,10 @@ from typing import Any
 from langgraph.graph import StateGraph, END
 from loguru import logger
 
+# Tracks the last time The Odds API was called; None = never.
+# Enforces settings.odds_poll_interval_seconds between calls.
+_last_odds_fetch: datetime | None = None
+
 from polybot.api.espn import ESPNClient, Game
 from polybot.api.gamma import GammaClient
 from polybot.api.odds import OddsClient, SPORT_KEYS
@@ -573,7 +577,14 @@ async def fetch_odds_and_schedule(state: SportsScanState) -> dict[str, Any]:
     yesterday_games: list = []
 
     # ── The Odds API (Layer 2) ────────────────────────────────────────────────
-    if settings.odds_api_key:
+    global _last_odds_fetch
+    _odds_due = (
+        _last_odds_fetch is None
+        or (datetime.now(timezone.utc) - _last_odds_fetch).total_seconds()
+        >= settings.odds_poll_interval_seconds
+    )
+
+    if settings.odds_api_key and _odds_due:
         odds_client = OddsClient(api_key=settings.odds_api_key)
         active_sports = {
             keyword
@@ -590,6 +601,13 @@ async def fetch_odds_and_schedule(state: SportsScanState) -> dict[str, Any]:
                 logger.info("SPORTS Layer 2: {} {} games from Odds API", len(game_odds), sport)
             except Exception as e:
                 logger.warning("SPORTS Layer 2: Odds API failed for {}: {}", sport, e)
+        _last_odds_fetch = datetime.now(timezone.utc)
+    elif settings.odds_api_key:
+        secs_left = int(
+            settings.odds_poll_interval_seconds
+            - (datetime.now(timezone.utc) - _last_odds_fetch).total_seconds()
+        )
+        logger.debug("SPORTS Layer 2: Odds API throttled — next poll in {}s", secs_left)
     else:
         logger.debug("SPORTS Layer 2: ODDS_API_KEY not set — using Layer 1 alone (conf=0.7)")
 
