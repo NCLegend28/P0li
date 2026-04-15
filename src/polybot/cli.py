@@ -13,8 +13,22 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+# ── sys.path fix ──────────────────────────────────────────────────────────────
+# When run as `uv run src/polybot/cli.py`, Python inserts src/polybot/ into
+# sys.path[0] (the script's directory).  That causes polybot subpackages to
+# shadow installed libraries with the same name — most critically,
+# polybot/telegram/ shadows the python-telegram-bot `telegram` package.
+# Remove it before any application imports happen.
+_pkg_dir = str(Path(__file__).parent.resolve())
+while _pkg_dir in sys.path:
+    sys.path.remove(_pkg_dir)
+del _pkg_dir
+# ─────────────────────────────────────────────────────────────────────────────
 
 from loguru import logger
 
