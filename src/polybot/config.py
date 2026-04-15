@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     # Free tier: 500 req/month. Default 2h throttle = ≤12 calls/day, ~360/month.
     odds_poll_interval_seconds: int = Field(default=7200)
 
+    # ── Weather strategy ──────────────────────────────────────────────────────
+    # Comma-separated question types to trade. Options: exact,between,above,below
+    # "exact" = single temperature on a date (e.g. "be 23°C on April 14")
+    # "between" = bracket markets (e.g. "between 80-81°F") — historically negative EV
+    weather_question_types: str = Field(default="exact,between,above,below")
+
     # ── Delay Arbitrage ─────────────────────────────────────────────────────────
     # Gated by default — enable only after testing. Safe rollout toggle.
     delay_arb_enabled: bool = Field(default=False)

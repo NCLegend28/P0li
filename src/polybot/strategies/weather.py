@@ -36,6 +36,7 @@ class WeatherQuestion:
     hi:          float  # bracket high (always stored in °C)
     unit:        str    # "C" or "F" (original unit in question)
     target_date: str    # ISO date string "YYYY-MM-DD"
+    kind:        str = "exact"  # "exact", "between", "above", "below"
 
 
 _MONTH_MAP = {
@@ -128,7 +129,7 @@ def parse_question(question: str) -> WeatherQuestion | None:
             city=city,
             lo=_to_celsius(float(m.group("lo")), unit),
             hi=_to_celsius(float(m.group("hi")), unit),
-            unit=unit, target_date=target_date,
+            unit=unit, target_date=target_date, kind="between",
         )
 
     m = _BELOW_RE.search(question)
@@ -138,7 +139,7 @@ def parse_question(question: str) -> WeatherQuestion | None:
         return WeatherQuestion(
             city=city, lo=-999.0,
             hi=_to_celsius(val, unit),
-            unit=unit, target_date=target_date,
+            unit=unit, target_date=target_date, kind="below",
         )
 
     m = _ABOVE_RE.search(question)
@@ -147,7 +148,7 @@ def parse_question(question: str) -> WeatherQuestion | None:
         unit = (m.group("u1") or m.group("u2")).upper()
         return WeatherQuestion(
             city=city, lo=_to_celsius(val, unit),
-            hi=999.0, unit=unit, target_date=target_date,
+            hi=999.0, unit=unit, target_date=target_date, kind="above",
         )
 
     m = _EXACT_RE.search(question)
@@ -156,7 +157,7 @@ def parse_question(question: str) -> WeatherQuestion | None:
         val_c = _to_celsius(float(m.group("val")), unit)
         return WeatherQuestion(
             city=city, lo=val_c - 0.5, hi=val_c + 0.5,
-            unit=unit, target_date=target_date,
+            unit=unit, target_date=target_date, kind="exact",
         )
 
     return None
@@ -184,9 +185,10 @@ def estimate_probability(wq: WeatherQuestion, forecast: CityForecast) -> float:
 # ─── Strategy entry point ─────────────────────────────────────────────────────
 
 def evaluate_weather_markets(
-    markets:   list[Market],
-    forecasts: dict[str, CityForecast],
-    min_edge:  float = 0.08,
+    markets:        list[Market],
+    forecasts:      dict[str, CityForecast],
+    min_edge:       float = 0.08,
+    question_types: list[str] | None = None,
 ) -> list[Opportunity]:
 
     opportunities: list[Opportunity] = []
@@ -195,6 +197,10 @@ def evaluate_weather_markets(
         wq = parse_question(market.question)
         if wq is None:
             logger.debug(f"No parse: {market.question[:65]}")
+            continue
+
+        if question_types is not None and wq.kind not in question_types:
+            logger.debug(f"Filtered ({wq.kind}): {market.question[:55]}")
             continue
 
         forecast = forecasts.get(wq.city)

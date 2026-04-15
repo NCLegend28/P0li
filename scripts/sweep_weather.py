@@ -5,8 +5,10 @@ Runs the backtest across a grid of (min_edge, sigma, hours_before) and
 prints a ranked table of combinations by expected value.
 
 Usage:
-  uv run scripts/sweep_weather.py           # 30d history
-  uv run scripts/sweep_weather.py 60        # 60d history (more trades, slower)
+  uv run scripts/sweep_weather.py                  # 30d history, all types
+  uv run scripts/sweep_weather.py 60               # 60d history
+  uv run scripts/sweep_weather.py 60 exact         # exact-temperature markets only
+  uv run scripts/sweep_weather.py 60 exact,between # multiple types
 """
 
 import sys
@@ -25,7 +27,8 @@ import polybot.strategies.weather as _weather_mod
 
 console = Console()
 
-DAYS_BACK    = int(sys.argv[1]) if len(sys.argv) > 1 else 30
+DAYS_BACK      = int(sys.argv[1])                               if len(sys.argv) > 1 else 30
+QUESTION_TYPES = [t.strip() for t in sys.argv[2].split(",")]    if len(sys.argv) > 2 else None
 MIN_EDGES    = [0.05, 0.08, 0.12, 0.18]
 SIGMAS       = [1.2, 1.8, 2.5, 3.5]
 HOURS_BEFORE = [2, 7, 18]
@@ -47,9 +50,10 @@ async def sweep():
     combos = list(product(MIN_EDGES, SIGMAS, HOURS_BEFORE))
     rows   = []
 
+    type_str = ",".join(QUESTION_TYPES) if QUESTION_TYPES else "all"
     console.print(
         f"\n[bold cyan]🔬 Parameter sweep — {DAYS_BACK}d history  "
-        f"{len(combos)} combinations[/]\n"
+        f"{len(combos)} combinations  types={type_str}[/]\n"
     )
 
     orig_ep = _weather_mod.estimate_probability
@@ -65,10 +69,11 @@ async def sweep():
 
         try:
             result = await run_backtest(
-                days_back    = DAYS_BACK,
-                min_edge     = min_edge,
-                verbose      = False,
-                hours_before = hours,
+                days_back      = DAYS_BACK,
+                min_edge       = min_edge,
+                verbose        = False,
+                hours_before   = hours,
+                question_types = QUESTION_TYPES,
             )
         finally:
             _weather_mod.estimate_probability = orig_ep

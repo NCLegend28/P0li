@@ -49,6 +49,7 @@ class BacktestTrade:
     edge:              float
     resolution:        float   # 1.0 = YES resolved, 0.0 = NO resolved
     end_date:          str
+    question_type:     str = "exact"   # "exact", "between", "above", "below"
 
     @property
     def exit_price(self) -> float:
@@ -239,9 +240,11 @@ async def _clob_price_before_resolution(
 # ─── Core backtest ────────────────────────────────────────────────────────────
 
 async def run_backtest(
-    days_back: int   = 14,
-    min_edge:  float = 0.08,
-    verbose:   bool  = True,
+    days_back:      int            = 14,
+    min_edge:       float          = 0.08,
+    verbose:        bool           = True,
+    hours_before:   int            = 7,
+    question_types: list[str] | None = None,
 ) -> BacktestResult:
 
     result = BacktestResult(min_edge_threshold=min_edge, days_back=days_back)
@@ -273,11 +276,16 @@ async def run_backtest(
         if not tokens:
             continue
 
+        # Use the market's actual end date, not the date re-parsed from the
+        # question text. parse_question bumps past dates to next year, which
+        # causes the backtest to fetch next year's weather forecast.
+        actual_date = (raw.get("endDateIso") or "").split("T")[0] or wq.target_date
+
         # YES token = index 0
         yes_token = tokens[0]
-        valid_entries.append((raw, wq, res, ts, yes_token))
+        valid_entries.append((raw, wq, res, ts, yes_token, actual_date))
         if wq.city not in city_dates:
-            city_dates[wq.city] = wq.target_date
+            city_dates[wq.city] = actual_date
 
     logger.info(f"Valid entries: {len(valid_entries)}/{result.markets_scanned}  "
                 f"Cities: {list(city_dates.keys())[:8]}...")
@@ -286,38 +294,47 @@ async def run_backtest(
         return result
 
     # 3. Fetch Open-Meteo forecasts + CLOB prices concurrently
-    known_cities = {c: td for c, td in city_dates.items() if c in CITY_COORDS}
-    unknown      = set(city_dates) - set(known_cities)
+    unknown = {e[1].city for e in valid_entries if e[1].city not in CITY_COORDS}
     if unknown:
         logger.warning(f"Unknown cities (no coords): {unknown}")
 
-    # Semaphore limits concurrent Open-Meteo calls to 5 to avoid 429s
+    # Fetch one forecast per (city, date) pair — not just per city.
+    # Different markets for the same city can have different target dates.
     _sem = asyncio.Semaphore(5)
+    _fc_cache: dict[tuple[str, str], object] = {}
 
-    async def _fetch_fc(city, td):
+    async def _fetch_fc(city: str, td: str):
+        key = (city, td)
+        if key in _fc_cache:
+            return key, _fc_cache[key]
         async with _sem:
-            await asyncio.sleep(0.1)   # 100ms spacing between batches
+            await asyncio.sleep(0.1)
             async with OpenMeteoClient() as m:
-                return city, await m.fetch_forecast(city, target_date=td)
+                fc = await m.fetch_forecast(city, target_date=td)
+                _fc_cache[key] = fc
+                return key, fc
 
-    # Fetch forecasts with rate-limiting
-    fc_tasks    = [_fetch_fc(c, td) for c, td in known_cities.items()]
-    fc_results  = await asyncio.gather(*fc_tasks, return_exceptions=True)
-    forecasts: dict[str, object] = {}
+    fc_pairs   = [(e[1].city, e[5]) for e in valid_entries if e[1].city in CITY_COORDS]
+    fc_tasks   = [_fetch_fc(city, td) for city, td in fc_pairs]
+    fc_results = await asyncio.gather(*fc_tasks, return_exceptions=True)
+    forecasts: dict[tuple[str, str], object] = {}
+    ok_count = 0
     for r in fc_results:
         if isinstance(r, Exception):
             logger.warning(f"Forecast error: {r}")
         else:
-            city, fc = r
-            forecasts[city] = fc
+            k, fc = r
+            if fc is not None:
+                forecasts[k] = fc
+                ok_count += 1
 
-    logger.info(f"Forecasts: {len(forecasts)}/{len(known_cities)}")
+    logger.info(f"Forecasts: {ok_count}/{len(set(fc_pairs))}")
 
     # Fetch all CLOB prices concurrently
     async with httpx.AsyncClient(timeout=20.0) as clob_client:
         clob_tasks = [
-            _clob_price_before_resolution(token, ts, client=clob_client)
-            for _, _, _, ts, token in valid_entries
+            _clob_price_before_resolution(token, ts, hours_before=hours_before, client=clob_client)
+            for _, _, _, ts, token, _ in valid_entries
         ]
         clob_prices = await asyncio.gather(*clob_tasks, return_exceptions=True)
 
@@ -326,8 +343,8 @@ async def run_backtest(
     logger.info(f"CLOB prices retrieved: {result.clob_hits}/{len(valid_entries)}")
 
     # 4. Simulate trades
-    for (raw, wq, resolution, ts, token), clob_price in zip(valid_entries, clob_prices):
-        forecast = forecasts.get(wq.city)
+    for (raw, wq, resolution, ts, token, actual_date), clob_price in zip(valid_entries, clob_prices):
+        forecast = forecasts.get((wq.city, actual_date))
         if not forecast:
             continue
 
@@ -346,12 +363,16 @@ async def run_backtest(
         if abs(edge) < min_edge:
             continue
 
+        if question_types is not None and wq.kind not in question_types:
+            continue
+
         result.markets_with_edge += 1
         side        = Side.YES if edge > 0 else Side.NO
         entry_price = yes_mkt if side == Side.YES else round(1 - yes_mkt, 4)
 
+        q = raw.get("question", "")
         trade = BacktestTrade(
-            question          = raw.get("question", ""),
+            question          = q,
             city              = wq.city,
             side              = side,
             entry_price       = entry_price,
@@ -359,6 +380,7 @@ async def run_backtest(
             edge              = abs(edge),
             resolution        = resolution,
             end_date          = raw.get("endDateIso", ""),
+            question_type     = wq.kind,
         )
         result.trades.append(trade)
 
@@ -476,12 +498,45 @@ def print_report(result: BacktestResult) -> None:
             )
         console.print(ct)
 
+    # Question-type breakdown
+    type_stats: dict[str, dict] = {}
+    for tr in result.trades:
+        s = type_stats.setdefault(tr.question_type, {"n": 0, "w": 0, "pnl": 0.0})
+        s["n"] += 1
+        s["w"] += int(tr.won)
+        s["pnl"] += tr.pnl_pct
+
+    if type_stats:
+        console.print()
+        tt = Table(box=box.SIMPLE, show_header=True,
+                   header_style="bold grey50", padding=(0, 2),
+                   title="By Question Type")
+        tt.add_column("TYPE",   style="bright_cyan")
+        tt.add_column("TRADES", justify="right")
+        tt.add_column("WIN%",   justify="right")
+        tt.add_column("P&L%",   justify="right")
+        for qtype, s in sorted(type_stats.items(), key=lambda x: -x[1]["pnl"]):
+            wr = s["w"] / s["n"]
+            wc = "bright_green" if wr >= 0.55 else "bright_red"
+            pc = "bright_green" if s["pnl"] >= 0 else "bright_red"
+            tt.add_row(
+                qtype,
+                str(s["n"]),
+                f"[{wc}]{wr:.0%}[/]",
+                f"[{pc}]{s['pnl']:+.1f}%[/]",
+            )
+        console.print(tt)
+
     console.rule()
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
-async def main(days_back: int = 14, min_edge: float = 0.08) -> None:
+async def main(
+    days_back:      int            = 14,
+    min_edge:       float          = 0.08,
+    question_types: list[str] | None = None,
+) -> None:
     from loguru import logger as _log
     _log.remove()
     _log.add(
@@ -490,11 +545,14 @@ async def main(days_back: int = 14, min_edge: float = 0.08) -> None:
         format   = "{time:HH:mm:ss} | {message}",
         colorize = False,
     )
+    type_str = ",".join(question_types) if question_types else "all"
     console.print(
         f"\n[bold cyan]🔍 Backtesting weather strategy — "
-        f"last {days_back} days  min_edge={min_edge:.0%}[/]\n"
+        f"last {days_back} days  min_edge={min_edge:.0%}  types={type_str}[/]\n"
     )
-    result = await run_backtest(days_back=days_back, min_edge=min_edge)
+    result = await run_backtest(
+        days_back=days_back, min_edge=min_edge, question_types=question_types,
+    )
     print_report(result)
 
 
