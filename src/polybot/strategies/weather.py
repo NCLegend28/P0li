@@ -185,10 +185,11 @@ def estimate_probability(wq: WeatherQuestion, forecast: CityForecast) -> float:
 # ─── Strategy entry point ─────────────────────────────────────────────────────
 
 def evaluate_weather_markets(
-    markets:        list[Market],
-    forecasts:      dict[str, CityForecast],
-    min_edge:       float = 0.08,
-    question_types: list[str] | None = None,
+    markets:                   list[Market],
+    forecasts:                 dict[str, CityForecast],
+    min_edge:                  float = 0.08,
+    question_types:            list[str] | None = None,
+    max_hours_before_close:    float | None = None,
 ) -> list[Opportunity]:
 
     opportunities: list[Opportunity] = []
@@ -201,6 +202,13 @@ def evaluate_weather_markets(
 
         if question_types is not None and wq.kind not in question_types:
             logger.debug(f"Filtered ({wq.kind}): {market.question[:55]}")
+            continue
+
+        if max_hours_before_close is not None and market.hours_until_close > max_hours_before_close:
+            logger.debug(
+                f"Too early ({market.hours_until_close:.1f}h > {max_hours_before_close}h): "
+                f"{market.question[:50]}"
+            )
             continue
 
         forecast = forecasts.get(wq.city)

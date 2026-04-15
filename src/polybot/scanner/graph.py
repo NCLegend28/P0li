@@ -173,11 +173,13 @@ async def run_strategies(state: ScanState) -> dict[str, Any]:
 
     if weather_markets and state.forecast_cache:
         qt = [t.strip() for t in settings.weather_question_types.split(",")]
+        max_h = settings.weather_max_hours_before_close or None
         opps = evaluate_weather_markets(
-            markets        = weather_markets,
-            forecasts      = state.forecast_cache,
-            min_edge       = settings.min_edge_threshold,
-            question_types = qt,
+            markets                = weather_markets,
+            forecasts              = state.forecast_cache,
+            min_edge               = settings.min_edge_threshold,
+            question_types         = qt,
+            max_hours_before_close = max_h,
         )
         all_opps.extend(opps)
         logger.info(f"Weather strategy → {len(opps)} opportunities")

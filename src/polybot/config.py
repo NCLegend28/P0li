@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # "exact" = single temperature on a date (e.g. "be 23°C on April 14")
     # "between" = bracket markets (e.g. "between 80-81°F") — historically negative EV
     weather_question_types: str = Field(default="exact,between,above,below")
+    # Only enter a weather position within this many hours of market close.
+    # Sweep shows EV=+0.02 at 2h, EV=-0.05 at 7h, EV=-0.16 at 18h (exact-type markets).
+    # Set to 0.0 to disable the gate (consider all markets regardless of time to close).
+    weather_max_hours_before_close: float = Field(default=2.5)
 
     # ── Delay Arbitrage ─────────────────────────────────────────────────────────
     # Gated by default — enable only after testing. Safe rollout toggle.
