@@ -16,7 +16,7 @@ client = ClobClient(
     chain_id       = 137,
     key            = os.getenv("WALLET_PRIVATE_KEY"),
     creds          = creds,
-    signature_type = 2,                          # GNOSIS_SAFE proxy wallet
+    signature_type = 1,                          # GNOSIS_SAFE proxy wallet
     funder         = os.getenv("POLY_PROXY_ADDRESS"),
 )
 
@@ -28,11 +28,12 @@ print("Checking USDC balance...")
 bal = client.get_balance_allowance(
     params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
 )
-usdc     = float(bal.get("balance",    0)) / 1e6
-allowance = float(bal.get("allowance", 0)) / 1e6
+usdc       = float(bal.get("balance", 0)) / 1e6
+allowances = bal.get("allowances", {})
+max_allowance = max((int(v) for v in allowances.values()), default=0)
 print(f"  USDC balance:     ${usdc:,.2f}")
-print(f"  USDC allowance:   ${allowance:,.2f}")
-if allowance == 0:
+print(f"  USDC allowance:   {'unlimited' if max_allowance > 10**30 else f'${max_allowance/1e6:,.2f}'} ({len(allowances)} contracts approved)")
+if max_allowance == 0:
     print("  ⚠️  Allowance is 0 — run scripts/approve_usdc.py before live trading")
 
 print("Checking markets...")

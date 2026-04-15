@@ -5,9 +5,9 @@ from py_clob_client.client import ClobClient
 
 load_dotenv()   # ← this reads .env into os.environ
 
-pk = os.getenv("PRIVATE_KEY")
+pk = os.getenv("WALLET_PRIVATE_KEY")
 if not pk:
-    raise ValueError("PRIVATE_KEY not found — check your .env file")
+    raise ValueError("WALLET_PRIVATE_KEY not found — check your .env file")
 
 print(f"Using key: {pk[:6]}...{pk[-4:]}")  # shows first/last chars only, never full key
 

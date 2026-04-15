@@ -33,12 +33,17 @@ bal = client.get_balance_allowance(
         signature_type = 2,
     )
 )
-usdc      = float(bal.get("balance",    0)) / 1e6
-allowance = float(bal.get("allowance",  0)) / 1e6
+usdc      = float(bal.get("balance", 0)) / 1e6
+# API returns "allowances" (dict of contract -> amount), not "allowance"
+allowances = bal.get("allowances", {})
+max_allowance = max((int(v) for v in allowances.values()), default=0)
 print(f"  Balance:   ${usdc:,.2f}")
-print(f"  Allowance: ${allowance:,.2f}")
+print(f"  Approved contracts: {len(allowances)}")
+for addr, amt in allowances.items():
+    label = "unlimited" if int(amt) > 10**30 else f"${int(amt)/1e6:,.2f}"
+    print(f"    {addr}: {label}")
 
-if allowance > 0:
+if max_allowance > 0:
     print("\n✓ Allowance already set — nothing to do.")
 else:
     print("\nSetting USDC allowance for Exchange contract...")
@@ -57,6 +62,8 @@ else:
             signature_type = 2,
         )
     )
-    allowance2 = float(bal2.get("allowance", 0)) / 1e6
-    print(f"  New allowance: ${allowance2:,.2f}")
+    allowances2 = bal2.get("allowances", {})
+    max2 = max((int(v) for v in allowances2.values()), default=0)
+    label2 = "unlimited" if max2 > 10**30 else f"${max2/1e6:,.2f}"
+    print(f"  New allowance: {label2}")
     print("\n✓ Done — bot can now place live orders.")
