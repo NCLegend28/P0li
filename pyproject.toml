@@ -30,15 +30,32 @@ dev = [
     "ruff>=0.9,<1.0",
     "mypy>=1.14,<2.0",
 ]
+# Research extras for the polybot_research.eml_node project. Heavy ML deps
+# isolated here so production installs of the live bot stay lean.
+research = [
+    "torch>=2.4,<3.0",
+    "torchdiffeq>=0.2.5,<1.0",
+    "polars>=1.20,<2.0",
+    "pyarrow>=18.0,<22.0",
+    "mlflow>=2.20,<4.0",
+    "pysr>=0.19,<2.0",
+    "sympy>=1.13,<2.0",
+    "mpmath>=1.3,<2.0",
+]
 
 [project.scripts]
 scan              = "polybot.cli:run"
 dashboard         = "polybot.cli:run_dashboard"
 backtest-weather  = "polybot.backtest.engine:run"
 backtest-sports   = "polybot.backtest.sports_engine:run"
+# Research project entry points (polybot_research.eml_node)
+eml-schema-check  = "polybot_research.eml_node.cli:schema_check"
+eml-phase0        = "polybot_research.eml_node.cli:phase0"
+eml-sanity        = "polybot_research.eml_node.cli:sanity"
+eml-status        = "polybot_research.eml_node.cli:status"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/polybot"]
+packages = ["src/polybot", "src/polybot_research"]
 
 [tool.ruff]
 line-length = 100

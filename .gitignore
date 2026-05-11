@@ -14,7 +14,7 @@ dist/
 build/
 
 # Project runtime outputs
-data/
+/data/
 *.log
 *.jsonl
 
