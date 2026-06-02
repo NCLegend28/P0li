@@ -1,4 +1,5 @@
 import os
+from typing import Any, cast
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
@@ -25,11 +26,17 @@ ok = client.get_ok()
 print(f"  CLOB reachable:   {ok}")
 
 print("Checking USDC balance...")
-bal = client.get_balance_allowance(
-    params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-)
-usdc     = float(bal.get("balance",    0)) / 1e6
-allowance = float(bal.get("allowance", 0)) / 1e6
+bal = cast(Any, client.get_balance_allowance(
+    params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+))
+usdc = float(bal.get("balance", 0)) / 1e6
+# py-clob-client now returns an `allowances` map keyed by exchange/spender
+# contract, not a single `allowance` field. Treat any positive spender
+# allowance as usable; old clients may still return `allowance`.
+if "allowances" in bal:
+    allowance = max(float(v) for v in bal.get("allowances", {}).values()) / 1e6
+else:
+    allowance = float(bal.get("allowance", 0)) / 1e6
 print(f"  USDC balance:     ${usdc:,.2f}")
 print(f"  USDC allowance:   ${allowance:,.2f}")
 if allowance == 0:

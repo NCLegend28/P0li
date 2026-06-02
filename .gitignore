@@ -27,3 +27,6 @@ build/
 
 p0li
 p0li.pub
+
+._*
+.claude/worktrees/

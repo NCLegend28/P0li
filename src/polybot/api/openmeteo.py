@@ -12,6 +12,7 @@ Docs: https://open-meteo.com/en/docs
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 from loguru import logger
@@ -21,6 +22,11 @@ from polybot.utils.retry import async_retry
 
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 GEO_BASE        = "https://geocoding-api.open-meteo.com/v1"
+
+# Forecasts update ~4x/day. 30 min cache slashes API calls without losing signal.
+_CACHE_TTL_SEC = 30 * 60
+# (city_key, target_date_or_None) → (forecast, fetched_at_unix)
+_FORECAST_CACHE: dict[tuple[str, str | None], tuple["CityForecast", float]] = {}
 
 # ─── City registry ────────────────────────────────────────────────────────────
 # Expand this as you see new cities appearing on Polymarket
@@ -239,9 +245,16 @@ class OpenMeteoClient:
         """
         Fetch daily high/low for a city.
         target_date: ISO date string e.g. '2026-03-24', defaults to today.
+
+        Cached in-process for _CACHE_TTL_SEC to avoid Open-Meteo 429s on the free tier.
         """
         key = city_key.upper()
         lat, lon = CITY_COORDS[key]
+
+        cache_key = (key, target_date)
+        cached = _FORECAST_CACHE.get(cache_key)
+        if cached is not None and (time.monotonic() - cached[1]) < _CACHE_TTL_SEC:
+            return cached[0]
 
         params = {
             "latitude":    lat,
@@ -252,8 +265,22 @@ class OpenMeteoClient:
             "forecast_days": 7,
         }
 
-        resp = await self._client.get("/forecast", params=params)
-        resp.raise_for_status()
+        try:
+            resp = await self._client.get("/forecast", params=params)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Respect Retry-After on 429 so the retry decorator actually waits long enough.
+            if exc.response.status_code == 429:
+                ra = exc.response.headers.get("Retry-After")
+                wait = 60.0
+                if ra:
+                    try:
+                        wait = max(wait, float(ra))
+                    except ValueError:
+                        pass
+                logger.warning(f"Open-Meteo 429 for {key} — sleeping {wait:.0f}s before retry")
+                await asyncio.sleep(wait)
+            raise
         raw = resp.json()
 
         if target_date:
@@ -272,6 +299,7 @@ class OpenMeteoClient:
             # Else fall through to today (index 0)
 
         fc = CityForecast.from_raw(key, lat, lon, raw)
+        _FORECAST_CACHE[cache_key] = (fc, time.monotonic())
         logger.debug(f"{key}: high={fc.high_temp_c:.1f}°C ({fc.high_temp_f:.1f}°F)")
         return fc
 

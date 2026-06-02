@@ -39,16 +39,88 @@ from polybot.api.espn import ESPNClient, Game
 from polybot.api.gamma import GammaClient
 from polybot.api.odds import OddsClient, SPORT_KEYS
 from polybot.config import settings
-from polybot.models import Market, MarketCategory, TradeStatus
+from polybot.models import LiveGameContext, Market, MarketCategory, TradeStatus
 from polybot.scanner.sports_state import MatchedPair, SportsScanState
 from polybot.strategies.exit import compute_exit_signals
+from polybot.strategies.llm_picker import pick_opportunities
 from polybot.strategies.sports import evaluate_sports_markets, MatchedGame
 from polybot.strategies.us_direct import USDirectStrategy, USEvent
 from polybot.strategies.delay_arb import DelayArbitrageStrategy
 
 # Sports leagues to scan on the global Gamma API
 _SPORTS_KEYWORDS = ["NBA", "NFL", "MLB", "NHL", "FIFA", "UFC",
-                    "Premier League", "Champions League", "MLS", "WNBA"]
+                    "Premier League", "Champions League", "MLS", "WNBA",
+                    "EPL", "UCL"]
+
+# Per-league text markers — case-insensitive substrings that identify a league
+# from a market question, US event title, or slug. Used by the v1 scope filter
+# (`settings.sports_league_set`) to drop markets outside the enabled leagues.
+#
+# Ambiguous mascots (Rangers, Giants, Cardinals — shared between leagues) are
+# deliberately omitted; the league acronym in question text is a reliable
+# fallback for those games.
+_LEAGUE_MARKERS: dict[str, tuple[str, ...]] = {
+    "NBA":  ("nba", "lakers", "celtics", "warriors", "nuggets", "bucks",
+             "76ers", "sixers", "knicks", "thunder", "timberwolves",
+             "mavericks", "suns", "clippers", "pacers", "magic", "bulls",
+             "raptors", "hawks", "hornets", "cavaliers", "cavs", "pistons",
+             "rockets", "grizzlies", "pelicans", "spurs", "trail blazers",
+             "jazz", "wizards", "heat", "nets"),
+    "MLB":  ("mlb", "yankees", "red sox", "dodgers", "mets",
+             "cubs", "braves", "astros", "phillies", "padres", "mariners",
+             "blue jays", "orioles", "guardians", "tigers",
+             "white sox", "royals", "twins", "athletics", "angels",
+             "rays", "marlins", "nationals", "pirates", "reds", "brewers",
+             "rockies", "diamondbacks"),
+    "EPL":  ("epl", "premier league", "liverpool", "arsenal", "chelsea",
+             "tottenham", "newcastle", "manchester city",
+             "manchester united", "everton", "aston villa",
+             "west ham", "brighton"),
+    "UCL":  ("ucl", "champions league", "real madrid", "barcelona",
+             "bayern munich", "psg", "paris saint-germain",
+             "juventus", "inter milan", "ac milan", "atletico madrid"),
+    "MLS":  ("mls", "lafc", "inter miami", "la galaxy",
+             "seattle sounders", "atlanta united", "nycfc"),
+    "FIFA": ("fifa", "world cup", "copa america", "uefa euro"),
+    # Out-of-scope-by-default leagues are still recognised so they can be
+    # opted back in via SPORTS_LEAGUES.
+    "NHL":  ("nhl", "maple leafs", "canadiens", "bruins", "blackhawks",
+             "penguins", "flyers", "capitals", "avalanche", "oilers",
+             "canucks", "panthers", "lightning"),
+    "NFL":  ("nfl", "super bowl", "patriots", "chiefs", "cowboys",
+             "packers", "eagles", "steelers", "ravens", "49ers",
+             "broncos", "seahawks", "rams"),
+    "WNBA": ("wnba", "liberty", "aces", "sky", "fever", "storm"),
+    "UFC":  ("ufc", "mma"),
+}
+
+# Compile each league's markers as a single word-bounded, case-insensitive
+# regex so short acronyms ("nba") don't accidentally match inside longer words
+# ("wnba"), and team-name phrases ("premier league") still match correctly.
+_LEAGUE_PATTERNS: dict[str, re.Pattern[str]] = {
+    code: re.compile(
+        r"\b(?:" + "|".join(re.escape(m) for m in markers) + r")\b",
+        re.IGNORECASE,
+    )
+    for code, markers in _LEAGUE_MARKERS.items()
+}
+
+
+def _matched_leagues(text: str) -> frozenset[str]:
+    """Return league codes whose markers appear (case-insensitive, word-bounded) in `text`."""
+    if not text:
+        return frozenset()
+    return frozenset(
+        code for code, pat in _LEAGUE_PATTERNS.items()
+        if pat.search(text)
+    )
+
+
+def _in_enabled_leagues(text: str, enabled: frozenset[str]) -> bool:
+    """True if any marker for an enabled league appears in `text`."""
+    if not enabled:
+        return False
+    return bool(_matched_leagues(text) & enabled)
 
 # Min match score to consider a global ↔ US pair as the same game.
 # 0.50 with token-overlap scoring; revisit after seeing real sample text.
@@ -404,16 +476,19 @@ async def fetch_global_sports(state: SportsScanState) -> dict[str, Any]:
         logger.warning("SPORTS Layer 1: Gamma API unreachable — skipping scan: {}", exc)
         return {"global_sports": []}
 
+    enabled = settings.sports_league_set
     sports_markets = [
         m for m in markets
         if m.category == MarketCategory.SPORTS
         and m.hours_until_close >= 1.0
         and 0.05 <= m.yes_price <= 0.95
+        and _in_enabled_leagues(m.question, enabled)
     ]
 
     logger.info(
-        "SPORTS Layer 1: {}/{} global markets qualify (sports, active, priced)",
-        len(sports_markets), len(markets),
+        "SPORTS Layer 1: {}/{} global markets qualify "
+        "(sports, active, priced, leagues={})",
+        len(sports_markets), len(markets), ",".join(sorted(enabled)) or "<none>",
     )
     return {"global_sports": sports_markets}
 
@@ -457,10 +532,16 @@ async def fetch_us_events(state: SportsScanState) -> dict[str, Any]:
         # Flatten events → market dicts.
         # Titles and startTime live on the event, not the market — propagate them
         # down so _best_match and _extract_us_yes_price have full context.
+        # Skip events whose title/slug don't match an enabled league (v1 scope).
+        enabled = settings.sports_league_set
         markets: list[dict] = []
+        kept_events = 0
         for event in events:
             event_title    = event.get("title", "")
             event_slug     = event.get("slug", "")
+            if not _in_enabled_leagues(f"{event_title} {event_slug}", enabled):
+                continue
+            kept_events += 1
             event_start    = event.get("startTime", "")
             event_status   = "status_scheduled" if not event.get("closed") else "status_final"
             for mkt in event.get("markets", [event]):
@@ -475,6 +556,10 @@ async def fetch_us_events(state: SportsScanState) -> dict[str, Any]:
                     enriched["status"] = event_status
                 markets.append(enriched)
 
+        logger.info(
+            "SPORTS Layer 3: {}/{} events kept after league filter ({} markets)",
+            kept_events, len(events), len(markets),
+        )
         return {"us_events": markets}
     except Exception as e:
         logger.error("SPORTS Layer 3: US SDK fetch failed: {}", e)
@@ -572,6 +657,8 @@ async def fetch_odds_and_schedule(state: SportsScanState) -> dict[str, Any]:
     today_games: list = []
     yesterday_games: list = []
 
+    enabled = settings.sports_league_set
+
     # ── The Odds API (Layer 2) ────────────────────────────────────────────────
     if settings.odds_api_key:
         odds_client = OddsClient(api_key=settings.odds_api_key)
@@ -581,6 +668,7 @@ async def fetch_odds_and_schedule(state: SportsScanState) -> dict[str, Any]:
             for keyword in _SPORTS_KEYWORDS
             if keyword.upper() in pair.global_market.question.upper()
             and keyword.upper() in SPORT_KEYS
+            and keyword.upper() in enabled
         }
 
         for sport in list(active_sports)[:3]:   # cap at 3 sports to preserve quota
@@ -594,12 +682,18 @@ async def fetch_odds_and_schedule(state: SportsScanState) -> dict[str, Any]:
         logger.debug("SPORTS Layer 2: ODDS_API_KEY not set — using Layer 1 alone (conf=0.7)")
 
     # ── ESPN schedule + injuries ──────────────────────────────────────────────
+    # NBA/MLB/NHL/NFL have ESPN schedule + injury feeds. Soccer leagues
+    # (EPL/UCL/MLS) have schedules via espn_live but no injury feed parser yet,
+    # so they're omitted here — soccer opportunities still surface, just
+    # without B2B/injury adjustments.
     espn = ESPNClient()
+    _ESPN_LEAGUES = ("NBA", "NFL", "MLB", "NHL")
     active_leagues = {
         keyword
         for pair in state.matched_pairs
-        for keyword in ["NBA", "NFL", "MLB", "NHL"]
+        for keyword in _ESPN_LEAGUES
         if keyword in pair.global_market.question.upper()
+        and keyword in enabled
     }
 
     async def _fetch_league(league: str):
@@ -630,6 +724,116 @@ async def fetch_odds_and_schedule(state: SportsScanState) -> dict[str, Any]:
         "today_games": today_games,
         "yesterday_games": yesterday_games,
     }
+
+
+# ─── Node: enrich_with_vault ─────────────────────────────────────────────────
+# Module-level singleton — vault lookups are filesystem reads with internal
+# caching; one client across scans is fine and avoids re-stat'ing every loop.
+_VAULT_CLIENT: Any = None
+
+
+def _get_vault_client():
+    global _VAULT_CLIENT
+    if _VAULT_CLIENT is None:
+        from polybot.api.vault import VaultClient
+        _VAULT_CLIENT = VaultClient(
+            vault_root        = settings.vault_path or None,
+            cache_ttl_seconds = settings.vault_cache_seconds,
+        )
+    return _VAULT_CLIENT
+
+
+def _pair_sport(pair: MatchedPair) -> str | None:
+    """
+    Identify the sport code for a matched pair by checking which enabled league
+    markers appear in its text. Returns one of NBA / MLB / EPL / UCL / MLS /
+    FIFA / etc., or None when no marker hits.
+    """
+    enabled = settings.sports_league_set
+    text = f"{pair.global_market.question} {pair.us_title}"
+    leagues = _matched_leagues(text) & enabled
+    if not leagues:
+        return None
+    # Stable ordering so the same pair always resolves to the same sport.
+    return sorted(leagues)[0]
+
+
+async def enrich_with_vault(state: SportsScanState) -> dict[str, Any]:
+    """
+    Attach VaultContext to each MatchedPair for both teams when a page exists.
+
+    Team identity is resolved by checking the matched ESPN game (when found)
+    and falling back to parsing the question for known team mascots. Missing
+    vault pages are fine — vault context is purely additive.
+    """
+    if not state.matched_pairs:
+        return {}
+
+    vault = _get_vault_client()
+    if not vault.is_enabled():
+        return {}
+
+    hits = 0
+    for pair in state.matched_pairs:
+        sport = _pair_sport(pair)
+        if sport is None:
+            continue
+
+        # Prefer ESPN-derived team names (canonical form: "Los Angeles Lakers")
+        espn_game = _find_espn_game(pair.global_market.question, state.today_games)
+        if espn_game is not None:
+            home_name = espn_game.home_team
+            away_name = espn_game.away_team
+        else:
+            # Fall back: extract two mascot candidates from the question text
+            home_name, away_name = _extract_team_mascots_from_question(
+                pair.global_market.question, sport
+            )
+
+        if home_name:
+            ctx_home = vault.get_team_context(sport, home_name)
+            if ctx_home is not None:
+                pair.vault_home = ctx_home
+                hits += 1
+        if away_name:
+            ctx_away = vault.get_team_context(sport, away_name)
+            if ctx_away is not None:
+                pair.vault_away = ctx_away
+                hits += 1
+
+    logger.info(
+        "SPORTS vault: {} team-page hits across {} pairs",
+        hits, len(state.matched_pairs),
+    )
+    return {}
+
+
+def _extract_team_mascots_from_question(question: str, sport: str) -> tuple[str, str]:
+    """
+    Pull (home_mascot, away_mascot) from a question text using the league's
+    marker list. Returns the first two distinct, multi-character markers
+    found in order. The "first mascot" heuristic from live_sports.py treats
+    the first-mentioned team as the subject (YES side / typically home).
+
+    Falls back to ("", "") when fewer than two team markers are found.
+    """
+    markers = _LEAGUE_MARKERS.get(sport, ())
+    q = (question or "").lower()
+    hits: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for m in markers:
+        if len(m) < 4:   # skip league acronyms like "nba", "mlb"
+            continue
+        idx = q.find(m)
+        if idx >= 0 and m not in seen:
+            hits.append((idx, m))
+            seen.add(m)
+    hits.sort()
+    if len(hits) >= 2:
+        return hits[0][1], hits[1][1]
+    if len(hits) == 1:
+        return hits[0][1], ""
+    return "", ""
 
 
 # ─── Node: run_sports_strategy ────────────────────────────────────────────────
@@ -676,6 +880,8 @@ async def run_sports_strategy(state: SportsScanState) -> dict[str, Any]:
             ),
             home_team=espn_game.home_team if espn_game else "",
             away_team=espn_game.away_team if espn_game else "",
+            vault_home=pair.vault_home,
+            vault_away=pair.vault_away,
         ))
 
     # Kelly sizing inputs
@@ -705,15 +911,91 @@ async def run_sports_strategy(state: SportsScanState) -> dict[str, Any]:
 
 # ─── Node: monitor_sports_positions ──────────────────────────────────────────
 
+async def fetch_live_states(state: SportsScanState) -> dict[str, Any]:
+    """
+    For matched pairs that back an open position, fetch live ESPN game state
+    and attach a LiveGameContext to each pair. Powers the in-game exit logic
+    (BLOWOUT_STOP, SCORE_REVERSAL, GAME_ENDED) in monitor_sports_positions.
+
+    Skipped entirely when there are no open US sports positions — live fetches
+    are wasted bandwidth if there's nothing to monitor.
+    """
+    open_sports_ids = {
+        t.market_id for t in state.open_positions
+        if t.live_platform == "polymarket_us"
+    }
+    if not open_sports_ids:
+        return {"live_game_states": []}
+
+    target_pairs = [
+        p for p in state.matched_pairs
+        if p.global_market.id in open_sports_ids
+    ]
+    if not target_pairs:
+        return {"live_game_states": []}
+
+    # ESPN live scoreboard supports these leagues; FIFA tournaments aren't on
+    # the scoreboard endpoint (use individual competition paths instead — out
+    # of scope for v1). Soccer leagues that ARE supported still work.
+    _ESPN_LIVE_LEAGUES = {"NBA", "MLB", "EPL", "UCL", "MLS", "NHL", "NFL", "WNBA"}
+    enabled = settings.sports_league_set
+
+    leagues_to_fetch: set[str] = set()
+    for p in target_pairs:
+        text = f"{p.global_market.question} {p.us_title}"
+        leagues_to_fetch.update(_matched_leagues(text) & enabled & _ESPN_LIVE_LEAGUES)
+
+    if not leagues_to_fetch:
+        return {"live_game_states": []}
+
+    from polybot.api.espn_live import ESPNLiveClient
+
+    espn_live = ESPNLiveClient(poll_interval=settings.espn_live_poll_interval)
+    all_live: list[LiveGameContext] = []
+    for lg in sorted(leagues_to_fetch):
+        try:
+            games = await espn_live.fetch_all_live(lg)
+            all_live.extend(games)
+        except Exception as e:
+            logger.warning("SPORTS live: ESPN fetch failed for {}: {}", lg, e)
+
+    # Attach a LiveGameContext to each target pair by team-token overlap.
+    attached = 0
+    for pair in target_pairs:
+        q_tokens = _team_tokens(pair.global_market.question) | _team_tokens(pair.us_title)
+        best, best_score = None, 0
+        for ctx in all_live:
+            ctx_tokens = _team_tokens(ctx.home_team) | _team_tokens(ctx.away_team)
+            score = len(q_tokens & ctx_tokens)
+            if score > best_score:
+                best, best_score = ctx, score
+        if best is not None and best_score >= 1:
+            pair.live_context = best
+            attached += 1
+
+    logger.info(
+        "SPORTS live: {} live games across {} leagues, attached to {}/{} target pairs",
+        len(all_live), len(leagues_to_fetch), attached, len(target_pairs),
+    )
+    return {"live_game_states": all_live}
+
+
 async def monitor_sports_positions(state: SportsScanState) -> dict[str, Any]:
     """
     Check open sports positions for exit conditions.
 
-    Uses the standard exit engine (pregame_lock, time_stop, profit_target,
-    edge_collapsed). Prices come from the latest matched pairs (US prices).
+    Runs two exit engines:
+      1. Standard (exit.py) — profit target, edge collapse, time stop,
+         pregame lock. Driven by current US price + hours remaining.
+      2. Live in-game (live_sports.py + exit.py) — GAME_ENDED, BLOWOUT_STOP,
+         SCORE_REVERSAL. Driven by ESPN live state attached in
+         fetch_live_states.
+
+    Live signals win when both engines fire on the same trade — they're more
+    specific and reference actual game state instead of price heuristics.
     """
     if not state.open_positions:
-        return {"exit_signals": []}
+        return {"exit_signals": [], "live_exit_signals": []}
 
     # Key alignment: TradeRecord.market_id == Opportunity.market.id == global_market.id
     # Sports positions use US prices for current value, but are identified by the
@@ -749,14 +1031,41 @@ async def monitor_sports_positions(state: SportsScanState) -> dict[str, Any]:
         except Exception as exc:
             logger.warning("SPORTS: Gamma unreachable for stale price refresh: {}", exc)
 
+    # ── Standard exit signals (price- and time-based) ─────────────────────────
     signals = compute_exit_signals(
         open_trades=sports_positions,
         current_prices=current_prices,
         hours_to_close=hours_to_close,
     )
 
-    if signals:
-        logger.info("SPORTS: {} exit signals generated", len(signals))
+    # ── Live in-game exit signals ─────────────────────────────────────────────
+    from polybot.strategies.exit import compute_live_exit_signals
+    from polybot.strategies.live_sports import compute_live_model_probs
+
+    model_probs, live_contexts = compute_live_model_probs(
+        open_trades=sports_positions,
+        matched_pairs=state.matched_pairs,
+    )
+    live_signals = compute_live_exit_signals(
+        open_trades=sports_positions,
+        current_prices=current_prices,
+        live_contexts=live_contexts,
+        model_probs=model_probs,
+    )
+
+    # Dedup: when a live signal fires on the same trade as a standard signal,
+    # the live one wins (it carries the game-state context the user wants).
+    live_trade_ids = {s.trade_id for s in live_signals}
+    standard_filtered = [s for s in signals if s.trade_id not in live_trade_ids]
+    merged = live_signals + standard_filtered
+
+    if merged:
+        logger.info(
+            "SPORTS: {} exit signals ({} live + {} standard) generated",
+            len(merged), len(live_signals), len(standard_filtered),
+        )
+
+    return {"exit_signals": merged, "live_exit_signals": live_signals}
 
 # ─── Node: run_us_direct_strategy ───────────────────────────────────────────
 
@@ -834,6 +1143,33 @@ async def run_us_direct_strategy(state: SportsScanState) -> dict[str, Any]:
     
     return {"us_opportunities": us_opportunities, "delay_opportunities": delay_opportunities}
 
+
+# ─── Node: llm_pick_sports ────────────────────────────────────────────────────
+
+async def llm_pick_sports(state: SportsScanState) -> dict[str, Any]:
+    """
+    LLM intuition filter over all three sports opportunity streams.
+
+    Runs a single LLM pass per stream so the model sees the full batch in
+    context. Disabled by default (settings.llm_picker_enabled). When
+    disabled or on error, returns the input streams unchanged.
+    """
+    out: dict[str, Any] = {}
+    if state.opportunities:
+        out["opportunities"] = await pick_opportunities(
+            state.opportunities, scan_number=state.scan_number,
+        )
+    if state.us_opportunities:
+        out["us_opportunities"] = await pick_opportunities(
+            state.us_opportunities, scan_number=state.scan_number,
+        )
+    if state.delay_opportunities:
+        out["delay_opportunities"] = await pick_opportunities(
+            state.delay_opportunities, scan_number=state.scan_number,
+        )
+    return out
+
+
 def build_sports_scanner_graph() -> Any:
     """
     Assemble the sports scanner LangGraph pipeline.
@@ -856,23 +1192,38 @@ def build_sports_scanner_graph() -> Any:
     builder.add_node("fetch_us_events",          fetch_us_events)
     builder.add_node("match_markets",            match_markets)
     builder.add_node("fetch_odds_and_schedule",  fetch_odds_and_schedule)
-    
+
+    # Vault enrichment (Obsidian sports knowledge layer)
+    builder.add_node("enrich_with_vault",        enrich_with_vault)
+
     # Strategy nodes
     builder.add_node("run_sports_strategy",      run_sports_strategy)
     builder.add_node("run_us_direct_strategy",   run_us_direct_strategy)
-    
-    # Position monitoring
+    builder.add_node("llm_pick_sports",          llm_pick_sports)
+
+    # Live in-game state + position monitoring
+    builder.add_node("fetch_live_states",        fetch_live_states)
     builder.add_node("monitor_sports_positions", monitor_sports_positions)
 
-    # Sequential pipeline: arb strategy runs first, then US direct, then monitor
+    # Sequential pipeline:
+    #   discovery → vault enrichment → pre-game arb → US-direct
+    #   → live state → monitor (incl. live exits)
+    # enrich_with_vault runs AFTER fetch_odds_and_schedule (which provides
+    # today_games for team-name resolution) and BEFORE run_sports_strategy
+    # (so vault flags can nudge Opportunity confidence).
+    # fetch_live_states runs only when there are open US sports positions;
+    # otherwise it returns empty quickly.
     builder.set_entry_point("fetch_global_sports")
     builder.add_edge("fetch_global_sports",      "fetch_us_events")
     builder.add_edge("fetch_us_events",          "match_markets")
     builder.add_edge("match_markets",            "fetch_odds_and_schedule")
-    builder.add_edge("fetch_odds_and_schedule",  "run_sports_strategy")
+    builder.add_edge("fetch_odds_and_schedule",  "enrich_with_vault")
+    builder.add_edge("enrich_with_vault",        "run_sports_strategy")
     builder.add_edge("run_sports_strategy",      "run_us_direct_strategy")
-    builder.add_edge("run_us_direct_strategy",   "monitor_sports_positions")
-    
+    builder.add_edge("run_us_direct_strategy",   "llm_pick_sports")
+    builder.add_edge("llm_pick_sports",          "fetch_live_states")
+    builder.add_edge("fetch_live_states",        "monitor_sports_positions")
+
     builder.add_edge("monitor_sports_positions", END)
 
     return builder.compile()

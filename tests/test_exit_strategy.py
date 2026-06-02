@@ -8,25 +8,34 @@ from polybot.strategies.exit import ExitReason, compute_exit_signals
 
 class TestComputeExitSignals:
     def test_profit_target_hit(self, open_trade):
-        # Entry at 0.35, target = min(0.35 * 1.8, 0.92) = 0.63
+        # Entry at 0.35, target = min(0.35 * 1.5, 0.92) = 0.525
         signals = compute_exit_signals(
             open_trades    = [open_trade],
-            current_prices = {open_trade.market_id: 0.70},
+            current_prices = {open_trade.market_id: 0.55},
             hours_to_close = {open_trade.market_id: 24.0},
         )
         assert len(signals) == 1
         assert signals[0].reason == ExitReason.PROFIT_TARGET
-        assert signals[0].exit_price == pytest.approx(0.70, abs=0.001)
+        assert signals[0].exit_price == pytest.approx(0.55, abs=0.001)
 
-    def test_edge_collapsed(self, open_trade):
-        # Entry at 0.35, collapse threshold = 0.03 → exit if < 0.32
+    def test_stop_loss_hit(self, open_trade):
+        # Entry at 0.35, 40% stop → exit if <= 0.21
         signals = compute_exit_signals(
             open_trades    = [open_trade],
-            current_prices = {open_trade.market_id: 0.30},
+            current_prices = {open_trade.market_id: 0.20},
             hours_to_close = {open_trade.market_id: 24.0},
         )
         assert len(signals) == 1
         assert signals[0].reason == ExitReason.EDGE_COLLAPSED
+
+    def test_stop_loss_not_hit_at_small_drop(self, open_trade):
+        # Entry 0.35, drop to 0.29 = 17% — below 40% stop, should HOLD
+        signals = compute_exit_signals(
+            open_trades    = [open_trade],
+            current_prices = {open_trade.market_id: 0.29},
+            hours_to_close = {open_trade.market_id: 24.0},
+        )
+        assert len(signals) == 0
 
     def test_time_stop(self, open_trade):
         # 15 min left — below 30-min threshold

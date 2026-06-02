@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from polybot.api.espn import Game, InjuryReport
 from polybot.api.odds import GameOdds
+from polybot.api.vault import VaultContext
 from polybot.models import LiveGameContext, Market, Opportunity, TradeRecord
 from polybot.strategies.exit import ExitSignal
 
@@ -39,6 +40,8 @@ class MatchedPair:
     us_status: str = "status_scheduled"  # from US event dict (closed/active flag)
     espn_game_id: str = ""        # ESPN event ID — join key for live state fetches
     live_context: LiveGameContext | None = None  # populated for in-progress games
+    vault_home:   VaultContext   | None = None   # vault knowledge for home team (when available)
+    vault_away:   VaultContext   | None = None   # vault knowledge for away team (when available)
 
 
 class SportsScanState(BaseModel):
