@@ -226,7 +226,7 @@ async def scan_loop(
             if opp_id is None:
                 continue
 
-            closed = trader.close_position(opp_id, signal.exit_price)
+            closed = trader.close_position(opp_id, signal.exit_price, signal.reason)
             exit_count += 1
             ds.daily_trades_closed += 1
             ds.daily_pnl += closed.pnl_usd
@@ -243,9 +243,15 @@ async def scan_loop(
 
         # ── Open new positions ─────────────────────────────────────────────────
         open_count = 0
+        open_skip_count = 0
         for opp in opps:
             already = any(t.market_id == opp.market.id for t in trader.positions.values())
             if already:
+                open_skip_count += 1
+                dash.log(
+                    f"[SKIP] already holding [dim]{opp.market.question[:42]}[/]",
+                    "INFO",
+                )
                 continue
 
             trade = trader.open_position(opp)
@@ -263,19 +269,31 @@ async def scan_loop(
                 if alerter:
                     await alerter.alert_opportunity(opp)
                     await alerter.alert_trade_opened(trade)
+            else:
+                open_skip_count += 1
+                dash.log(
+                    f"[SKIP] open failed for {opp.side} @ {opp.market_price:.3f} "
+                    f"edge={opp.edge_pct} — see bot.log for sizing/order reason",
+                    "WARN",
+                )
 
         if open_count == 0 and exit_count == 0:
-            dash.log("No actions this scan — all positions held", "INFO")
+            if open_skip_count:
+                dash.log(f"No actions this scan — {open_skip_count} opportunities skipped", "WARN")
+            else:
+                dash.log("No actions this scan — all positions held", "INFO")
 
         bot_state.last_opps = len(opps)
 
         if alerter and (open_count > 0 or exit_count > 0):
             await alerter.alert_scan_summary(scan_n, open_count, exit_count)
 
-        # Sync live balance into dashboard every scan
+        # Sync live wallet balance into dashboard every scan.
+        # Do NOT overwrite trader.balance — that is the paper book and is
+        # reconstructed from the JSONL trade log. The live wallet is
+        # surfaced separately via ds.live_balance.
         if settings.live_trading and trader._clob:
             live_bal = trader._clob.get_balance()
-            trader.balance = live_bal
             ds.live_mode    = True
             ds.live_balance = live_bal
             if alerter and (open_count > 0 or exit_count > 0):
@@ -390,7 +408,14 @@ async def sports_scan_loop(
             )
             if opp_id is None:
                 continue
-            closed = trader.close_position(opp_id, signal.exit_price)
+            # Pack reason + note for both the log line and Telegram alert.
+            # Live signals (GAME_ENDED/BLOWOUT_STOP/SCORE_REVERSAL) carry a
+            # rich note like "Game final: LAL 100–95 BOS"; standard signals
+            # have an empty note and we just show the reason.
+            reason_str = str(signal.reason)
+            detail = f"{reason_str} — {signal.note}" if signal.note else reason_str
+
+            closed = trader.close_position(opp_id, signal.exit_price, reason_str)
             ds.daily_trades_closed += 1
             ds.daily_pnl += closed.pnl_usd
             pnl_sign = "+" if closed.pnl_usd >= 0 else ""
@@ -398,19 +423,27 @@ async def sports_scan_loop(
                 f"[SPORTS EXIT] [magenta]{closed.id}[/] {closed.side} → "
                 f"[{'green' if closed.pnl_usd >= 0 else 'red'}]"
                 f"{pnl_sign}${closed.pnl_usd:.2f}[/]  "
-                f"[dim]{signal.reason}[/]",
+                f"[dim]{detail}[/]",
                 "EXIT",
             )
             if alerter:
-                await alerter.alert_trade_closed(closed, signal.reason)
+                await alerter.alert_trade_closed(closed, detail)
 
         # ── Open new sports positions ──────────────────────────────────────────
+        sports_open_count = 0
+        sports_skip_count = 0
         for opp in all_opps:
             already = any(t.market_id == opp.market.id for t in trader.positions.values())
             if already:
+                sports_skip_count += 1
+                dash.log(
+                    f"[SPORTS SKIP] already holding [dim]{opp.market.question[:42]}[/]",
+                    "INFO",
+                )
                 continue
             trade = trader.open_position(opp)
             if trade:
+                sports_open_count += 1
                 ds.daily_trades_opened += 1
                 # Determine opportunity type for logging
                 if opp.id.startswith("delay_arb_"):
@@ -430,6 +463,19 @@ async def sports_scan_loop(
                 if alerter:
                     await alerter.alert_opportunity(opp)
                     await alerter.alert_trade_opened(trade)
+            else:
+                sports_skip_count += 1
+                dash.log(
+                    f"[SPORTS SKIP] open failed for {opp.side} @ {opp.market_price:.3f} "
+                    f"edge={opp.edge_pct} — see bot.log/sports.log for sizing/order reason",
+                    "WARN",
+                )
+
+        if all_opps and sports_open_count == 0 and sports_skip_count:
+            dash.log(
+                f"[SPORTS] no trades opened — {sports_skip_count} opportunities skipped",
+                "WARN",
+            )
 
         # ── Countdown sleep (adaptive: fast only when a held game is near tip-off) ─
         # A position opened 6h before the game doesn't need 15s scans yet —
@@ -460,11 +506,62 @@ async def sports_scan_loop(
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+import atexit
+from pathlib import Path
+
+PID_FILE = Path("data/trades/bot.pid")
+
+
+def _acquire_instance_lock() -> None:
+    """Refuse to start if another bot process is alive.
+
+    Multiple concurrent instances corrupt trades.jsonl: each reloads the same log
+    and writes duplicate close records for the same opportunity_id. The PID file
+    is the single source of truth — a stale file (process dead) is silently
+    overwritten.
+    """
+    if PID_FILE.exists():
+        try:
+            existing = int(PID_FILE.read_text().strip() or "0")
+        except ValueError:
+            existing = 0
+        if existing > 0 and existing != os.getpid():
+            try:
+                os.kill(existing, 0)  # signal 0 = liveness probe, never delivers
+            except ProcessLookupError:
+                logger.warning(f"Stale PID file (pid={existing} not running) — overwriting")
+            except PermissionError:
+                # PID exists, owned by another user — assume alive, refuse to start.
+                raise SystemExit(
+                    f"Another polybot is already running (pid={existing}, different user). "
+                    f"Refusing to start a second instance — concurrent writes corrupt trades.jsonl."
+                )
+            else:
+                raise SystemExit(
+                    f"Another polybot is already running (pid={existing}). "
+                    f"Refusing to start a second instance — concurrent writes corrupt trades.jsonl. "
+                    f"Stop the running bot first:  kill {existing}"
+                )
+    PID_FILE.write_text(str(os.getpid()))
+
+
+def _release_instance_lock() -> None:
+    if PID_FILE.exists():
+        try:
+            if int(PID_FILE.read_text().strip() or "0") == os.getpid():
+                PID_FILE.unlink()
+        except (ValueError, OSError):
+            pass
+
+
 async def main() -> None:
     _configure_logging()
 
     from pathlib import Path
     Path("data/trades").mkdir(parents=True, exist_ok=True)
+
+    _acquire_instance_lock()
+    atexit.register(_release_instance_lock)
 
     trader    = TradingEngine()
 
@@ -475,14 +572,23 @@ async def main() -> None:
         trader.set_clob_client(clob)
 
     # ── Live execution — Polymarket US (sports) ────────────────────────────────
+    # The `sports_alert_only` flag is a hard kill-switch. When true the scanner
+    # still finds + alerts on opportunities but never wires a live US client,
+    # so trader.us_live_mode stays False and no real orders are placed.
     if settings.live_trading and settings.sports_enabled and settings.polymarket_key_id:
-        from polybot.api.polymarket_us import PolymarketUSClient
-        us_client = PolymarketUSClient(
-            key_id=settings.polymarket_key_id,
-            secret_key=settings.polymarket_secret_key,
-            max_daily_loss=settings.sports_max_daily_loss,
-        )
-        trader.set_us_client(us_client)
+        if settings.sports_alert_only:
+            logger.warning(
+                "SPORTS_ALERT_ONLY=true — skipping Polymarket US client wiring. "
+                "Sports opportunities will be alerted but NOT executed."
+            )
+        else:
+            from polybot.api.polymarket_us import PolymarketUSClient
+            us_client = PolymarketUSClient(
+                key_id=settings.polymarket_key_id,
+                secret_key=settings.polymarket_secret_key,
+                max_daily_loss=settings.sports_max_daily_loss,
+            )
+            trader.set_us_client(us_client)
     
     ds        = DashboardState(
         trader        = trader,
@@ -555,9 +661,13 @@ async def main() -> None:
 
         # Sports scan loop (separate task, separate log file)
         if settings.sports_enabled:
+            mode = "ALERT-ONLY" if settings.sports_alert_only else "LIVE"
             dash.log(
-                f"Sports scanner enabled — interval=[cyan]{settings.sports_scan_interval_seconds}s[/]  "
+                f"Sports scanner enabled ([yellow]{mode}[/]) — "
+                f"interval=[cyan]{settings.sports_scan_interval_seconds}s[/]  "
                 f"min_edge=[cyan]{settings.sports_min_edge:.0%}[/]  "
+                f"leagues=[cyan]{settings.sports_leagues}[/]  "
+                f"size=[cyan]${settings.sports_flat_size_usd:.0f}[/]  "
                 f"log=[dim]{settings.sports_log_path}[/]",
                 "INFO",
             )

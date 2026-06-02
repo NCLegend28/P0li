@@ -33,7 +33,7 @@ class ClobClient:
         self._client = _ClobClient(
             host           = "https://clob.polymarket.com",
             chain_id       = 137,
-            key            = settings.private_key,
+            key            = settings.wallet_private_key,
             creds          = creds,
             signature_type = 2,                        # GNOSIS_SAFE proxy wallet
             funder         = settings.poly_proxy_address,
@@ -132,7 +132,10 @@ class ClobClient:
                 token_id = token_id,
                 price    = price,
                 size     = shares,
-                side     = BUY if side == "YES" else SELL,
+                # `token_id` already selects the YES or NO outcome token.
+                # To open either side we BUY that selected token; SELL is only
+                # for closing/reducing an existing token position.
+                side     = BUY,
             )
 
             # create_and_post_order resolves tick_size and neg_risk

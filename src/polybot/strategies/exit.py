@@ -57,8 +57,8 @@ def compute_exit_signals(
     current_prices: dict[str, float],    # market_id → current YES price
     hours_to_close: dict[str, float],    # market_id → hours remaining
     *,
-    profit_target_multiplier: float = 1.8,   # exit when price = entry * 1.8
-    edge_collapse_threshold:  float = 0.05,  # edge fell below 5%
+    profit_target_multiplier: float = 1.5,   # exit when price = entry * 1.5 (+50%)
+    stop_loss_pct:            float = 0.40,  # exit when price <= entry * (1 - 0.40)
     time_stop_hours:          float = 0.5,   # close if < 30 min to resolution
     pregame_lock_hours:       float = 0.083, # sports: exit 5 min before tip-off
 ) -> list[ExitSignal]:
@@ -151,20 +151,21 @@ def compute_exit_signals(
             )
             continue
 
-        # ── Edge collapse: price moved against us past entry ───────────────────
-        if current_side_price < (trade.entry_price - edge_collapse_threshold):
+        # ── Stop loss: price dropped to (1 - stop_loss_pct) of entry ───────────
+        stop_price = trade.entry_price * (1.0 - stop_loss_pct)
+        if current_side_price <= stop_price:
             signals.append(ExitSignal(
                 trade_id      = trade.id,
                 reason        = ExitReason.EDGE_COLLAPSED,
                 exit_price    = current_side_price,
                 current_price = current_side_price,
                 note          = (
-                    f"Edge collapsed: entry={trade.entry_price:.3f} "
-                    f"now={current_side_price:.3f}"
+                    f"Stop loss: entry={trade.entry_price:.3f} "
+                    f"now={current_side_price:.3f} (-{stop_loss_pct*100:.0f}%)"
                 ),
             ))
             logger.info(
-                f"⚠️  EDGE COLLAPSED {trade.question[:40]} | "
+                f"🛑 STOP LOSS {trade.question[:40]} | "
                 f"entry={trade.entry_price:.3f} now={current_side_price:.3f}"
             )
             continue

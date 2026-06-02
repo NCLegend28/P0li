@@ -1,0 +1,50 @@
+# macOS metadata noise from exfat — never bake into image
+.DS_Store
+._*
+**/._*
+**/.DS_Store
+
+# Local dev artifacts
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets / local config — Docker uses env_file to pass values in at runtime.
+# .env* values must NEVER be baked into image layers.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Project data — mounted as a volume at runtime, not baked into the image
+data/
+*.pid
+*.log
+
+# Git / docs / tooling
+.git/
+.gitignore
+.gitattributes
+*.md
+docs/
+tests/
+scripts/
+
+# Editor
+.vscode/
+.idea/
+
+# Research subpackage — not needed for the runtime image
+src/polybot_research/
+
+# Misc keys that shouldn't end up in image layers
+p0li
+p0li.pub
+*.pem
+*.key
+id_*

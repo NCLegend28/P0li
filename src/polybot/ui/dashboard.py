@@ -29,7 +29,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich import box
 from rich.align import Align
@@ -42,7 +42,7 @@ from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
-    pass
+    from polybot.trading.engine import TradingEngine
 
 console = Console()
 
@@ -98,7 +98,7 @@ class DashboardState:
     opportunities: list = field(default_factory=list)
 
     # Trader reference
-    trader: object = None
+    trader: "TradingEngine | None" = None
 
     # Live weather market prices
     market_feed: list = field(default_factory=list)   # list[dict]
@@ -516,7 +516,10 @@ def _pnl_panel(state: DashboardState, w: int, h: int) -> Panel:
     open_val = sum(t.size_usd for t in trader.positions.values())
     nav      = trader.balance + open_val
     pnl      = nav - starting
-    pnl_pct  = (pnl / starting) * 100
+    # Guard: starting balance can be 0 in edge cases (live wallet drained, or
+    # SIMULATED_STARTING_BALANCE=0 in .env). Avoid the ZeroDivisionError so
+    # the panel still renders and downstream updates aren't short-circuited.
+    pnl_pct  = (pnl / starting * 100) if starting else 0.0
     pc       = C_GREEN if pnl >= 0 else C_RED
     pa       = "▲" if pnl >= 0 else "▼"
 
@@ -641,7 +644,8 @@ def _slug_league_teams(slug: str) -> tuple[str, str, str]:
     'aec-nba-sa-chi-2025-11-10' → ('NBA', 'SA', 'CHI')
     """
     parts = slug.lower().split("-")
-    league, teams = "", []
+    league = ""
+    teams: list[str] = []
     for part in parts:
         if part in _SPORTS_LEAGUES:
             league = part.upper()
@@ -828,7 +832,7 @@ def _sports_feed_panel(state: DashboardState, w: int, h: int) -> Panel:
 
     # Separator between opportunities and plain pairs
     if sep_row:
-        ncols = t.column_count
+        ncols = len(t.columns)
         t.add_row(*([f"[{C_DIM}]─[/]"] + [""] * (ncols - 1)))
 
     # Plain matched-pair rows
@@ -936,19 +940,41 @@ def build_layout() -> Layout:
 
 
 def render(layout: Layout, state: DashboardState) -> None:
+    """
+    Update every panel. Each panel is wrapped individually so a failure in one
+    (e.g. a div-by-zero in _pnl_panel) doesn't short-circuit the rest of the
+    column. The first exception per tick is surfaced in the event log so the
+    cause is visible instead of the panel just showing Rich's Layout repr.
+    """
     state.tick += 1
     tw, th = console.size
     dims   = _panel_dims(tw, th)
 
-    layout["header"].update(_header(state))
-    layout["left"].update(_scanner_panel(state,       *dims["left"]))
-    layout["positions"].update(_positions_panel(state,       *dims["positions"]))
-    layout["opportunities"].update(_opportunities_panel(state,    *dims["opportunities"]))
-    layout["pnl"].update(_pnl_panel(state,            *dims["pnl"]))
-    layout["sptfeed"].update(_sports_feed_panel(state, *dims["sptfeed"]))
-    layout["wxfeed"].update(_market_feed_panel(state,  *dims["wxfeed"]))
-    layout["closed"].update(_closed_panel(state,       *dims["closed"]))
-    layout["log"].update(_log_panel(state,             *dims["log"]))
+    panel_jobs: list[tuple[str, "Any"]] = [
+        ("header",        lambda: _header(state)),
+        ("left",          lambda: _scanner_panel(state,       *dims["left"])),
+        ("positions",     lambda: _positions_panel(state,     *dims["positions"])),
+        ("opportunities", lambda: _opportunities_panel(state, *dims["opportunities"])),
+        ("pnl",           lambda: _pnl_panel(state,           *dims["pnl"])),
+        ("sptfeed",       lambda: _sports_feed_panel(state,   *dims["sptfeed"])),
+        ("wxfeed",        lambda: _market_feed_panel(state,   *dims["wxfeed"])),
+        ("closed",        lambda: _closed_panel(state,        *dims["closed"])),
+        ("log",           lambda: _log_panel(state,           *dims["log"])),
+    ]
+
+    err_seen_this_tick = False
+    for name, build in panel_jobs:
+        try:
+            layout[name].update(build())
+        except Exception as e:
+            if not err_seen_this_tick:
+                state.event_log.append(
+                    f"[{C_DIM}]??:??:??[/]  [{C_RED}]✗[/]  panel '{name}' render error: {type(e).__name__}: {e}"
+                )
+                err_seen_this_tick = True
+            # Fall through — leave the failing panel at its previous frame
+            # (or the Layout placeholder if it's never rendered).
+            continue
 
 
 # ─── Dashboard class ─────────────────────────────────────────────────────────

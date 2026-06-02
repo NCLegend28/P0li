@@ -1,25 +1,37 @@
-# Two independent services that communicate over the internal Docker network.
+# Two services on the internal Docker network.
 #
-#   weather-bot  — headless scanner, publishes state via WebSocket on :8765 (internal only)
-#   dashboard    — consumes scanner state, serves browser UI on :8766 (public)
+#   weather-bot — headless scanner, publishes state via WebSocket on :8765 (internal only)
+#   dashboard   — consumes scanner state, serves browser UI on :8766 (bound to 127.0.0.1)
 #
 # Usage:
 #   cp .env.weather.example .env.weather   # fill in your keys
 #   cp .env.dashboard.example .env.dashboard
 #   docker compose up -d
+#
+# Security posture:
+#   - Both services run as non-root user `polybot` (set in Dockerfile)
+#   - Filesystems are read-only except for the trades volume + small tmpfs
+#   - no-new-privileges blocks setuid escalation
+#   - dashboard port bound to 127.0.0.1 — expose via reverse proxy if needed
+#   - weather-bot has NO published ports; dashboard reaches it over the internal net
 
 services:
   weather-bot:
     build: .
-    command: ["uv", "run", "scan"]
+    command: ["scan"]
     restart: unless-stopped
     env_file: .env.weather
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
     volumes:
       - trades_data:/app/data/trades
-    # Port 8765 is intentionally NOT exposed to the host.
-    # Only the dashboard service (on the same Docker network) connects to it.
     expose:
       - "8765"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health')"]
       interval: 30s
@@ -29,14 +41,21 @@ services:
 
   dashboard:
     build: .
-    command: ["uv", "run", "dashboard"]
+    command: ["dashboard"]
     restart: unless-stopped
     env_file: .env.dashboard
+    read_only: true
+    tmpfs:
+      - /tmp:size=32M
     ports:
       - "127.0.0.1:8766:8766"
     depends_on:
       weather-bot:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8766/health')"]
       interval: 30s

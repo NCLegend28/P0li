@@ -94,7 +94,9 @@ class Opportunity(BaseModel):
     us_market_slug: str = ""   # Polymarket US slug (e.g. "lakers-celtics-mar-29")
     global_price:   float | None = None   # Layer 1 consensus price
     confidence:     float = 0.7           # 0.5 / 0.7 / 1.0 from sports strategy
-    size_usd:       float = 10.0          # Kelly-sized position in USD
+    size_usd:       float = 0.0           # 0 = let trading engine size via Kelly + global cap.
+                                          # Strategies that want to hint a size (e.g. sports kelly_size)
+                                          # assign this explicitly; the engine treats >0 as a cap.
 
     @computed_field
     @property

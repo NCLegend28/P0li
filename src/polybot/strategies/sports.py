@@ -28,6 +28,7 @@ from loguru import logger
 
 from polybot.api.espn import ESPNClient, Game, InjuryReport
 from polybot.api.odds import GameOdds
+from polybot.api.vault import VaultContext
 from polybot.models import MarketCategory, Market, Opportunity, Side
 
 
@@ -43,6 +44,11 @@ class MatchedGame:
     status: str                 # "status_scheduled" etc.
     home_team: str
     away_team: str
+    # Vault knowledge for each team, attached upstream by enrich_with_vault.
+    # Both default to None when the user has no vault page for a team — the
+    # strategy still runs identically without them.
+    vault_home: VaultContext | None = None
+    vault_away: VaultContext | None = None
 
 
 # ─── Edge computation ─────────────────────────────────────────────────────────
@@ -156,6 +162,8 @@ class SportsStrategy:
         today_games: list[Game] | None = None,
         yesterday_games: list[Game] | None = None,
         position_size_usd: float = 10.0,
+        vault_home: VaultContext | None = None,  # Obsidian vault knowledge — home team
+        vault_away: VaultContext | None = None,  # Obsidian vault knowledge — away team
     ) -> Opportunity | None:
         """
         Evaluate a matched global ↔ US market pair for a trading opportunity.
@@ -233,6 +241,27 @@ class SportsStrategy:
                     us_slug,
                     ", ".join(f"{i.player} ({i.status})" for i in flagged),
                 )
+
+        # Vault context — surfaced in notes only. Confidence is NOT auto-adjusted
+        # in v1; the user reads the vault flags in the alert and decides. Once
+        # we've observed ~50 alerts with-vault-context, revisit and add weighted
+        # nudges for `key-player-out`, `bad-form`, etc.
+        for label, vctx in (("home", vault_home), ("away", vault_away)):
+            if vctx is None:
+                continue
+            tag = f"vault[{label}={vctx.team}"
+            if vctx.flags:
+                tag += f" flags={'/'.join(vctx.flags)}"
+            unavailable = [
+                p for p in vctx.key_players
+                if p.status in ("questionable", "doubtful", "out")
+            ]
+            if unavailable:
+                tag += f" players_out={len(unavailable)}"
+            if vctx.is_stale:
+                tag += f" STALE({vctx.age_days}d)"
+            tag += "]"
+            notes_parts.append(tag)
 
         # Book depth check
         if us_book_depth > 0 and us_book_depth < position_size_usd * 3:
@@ -320,6 +349,8 @@ def evaluate_sports_markets(
             today_games=today_games,
             yesterday_games=yesterday_games,
             position_size_usd=15.0,  # worst-case cap for book-depth guard
+            vault_home=pair.vault_home,
+            vault_away=pair.vault_away,
         )
         if opp:
             opp.size_usd = kelly_size(

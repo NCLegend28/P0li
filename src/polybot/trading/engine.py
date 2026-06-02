@@ -26,6 +26,7 @@ from rich import box
 
 from polybot.config import settings
 from polybot.models import Opportunity, TradeRecord, Side, TradeStatus
+from polybot.strategies.exit import ExitReason
 
 TRADE_LOG_PATH = Path("data/trades/trades.jsonl")
 console = Console()
@@ -53,6 +54,15 @@ class TradingEngine:
         """True when live trading is enabled and US platform client is wired in."""
         return settings.live_trading and self._us_clob is not None
 
+    def _venue_is_live(self, opp: Opportunity) -> bool:
+        """Route an opportunity to live execution iff its venue has a live client
+        wired in. Sports opportunities use the Polymarket US client; everything
+        else uses the global CLOB. With LIVE_TRADING=true and
+        SPORTS_ALERT_ONLY=true the user gets live weather + paper sports."""
+        if opp.us_market_slug:
+            return self.us_live_mode
+        return self.live_mode
+
     def set_clob_client(self, clob) -> None:
         """Wire in the global CLOB client. Called by cli.py at startup."""
         self._clob = clob
@@ -72,14 +82,25 @@ class TradingEngine:
             logger.info("No existing trade log found — starting fresh")
             return
 
+        # Reconcile per opportunity_id — later records supersede earlier ones.
+        # An opp_id closed in the log is closed; only opps whose latest record is
+        # still status=open should be re-loaded as live positions. Without this,
+        # a restart re-injects already-closed trades into self.positions and the
+        # next scan closes them again, corrupting the trade log.
+        latest: dict[str, TradeRecord] = {}
         with TRADE_LOG_PATH.open() as f:
             for line in f:
-                raw = json.loads(line.strip())
-                trade = TradeRecord.model_validate(raw)
-                if trade.status == TradeStatus.OPEN:
-                    self.positions[trade.opportunity_id] = trade
-                else:
-                    self.closed_trades.append(trade)
+                line = line.strip()
+                if not line:
+                    continue
+                trade = TradeRecord.model_validate_json(line)
+                latest[trade.opportunity_id] = trade
+
+        for trade in latest.values():
+            if trade.status == TradeStatus.OPEN:
+                self.positions[trade.opportunity_id] = trade
+            else:
+                self.closed_trades.append(trade)
 
         # Recompute balance from closed trades
         starting = self._starting_balance()
@@ -99,6 +120,52 @@ class TradingEngine:
 
     # ─── Position management ──────────────────────────────────────────────────
 
+    def _size_position(self, opp: Opportunity) -> float:
+        """Confidence-weighted fractional Kelly, capped by strategy hint, global cap, and exposure budget.
+
+        Full Kelly fraction for a binary $1-payoff contract: f* = edge / (1 - entry_price).
+        We use 0.25 × confidence as the Kelly multiplier — quarter-Kelly is the standard
+        safe target, scaled down further when the model is less confident in its edge.
+
+        Sports v1 override: if `sports_flat_size_usd` > 0 and this is a sports
+        opportunity (`opp.us_market_slug` is set), return that flat amount —
+        still clamped by balance and the 40% portfolio exposure cap.
+        """
+        price = opp.market_price
+        if not (0.0 < price < 1.0) or opp.edge <= 0:
+            return 0.0
+
+        # NAV = cash + capital tied up in open positions. We cap deployed
+        # capital at 40% of NAV, NOT 40% of remaining cash — otherwise the
+        # cap shrinks as you deploy and collapses to $0 in a feedback loop.
+        open_exposure    = sum(t.size_usd for t in self.positions.values())
+        nav              = self.balance + open_exposure
+        remaining_budget = max(0.0, nav * 0.40 - open_exposure)
+
+        is_sports_opp = bool(opp.us_market_slug)
+        if is_sports_opp and settings.sports_flat_size_usd > 0:
+            return max(0.0, min(settings.sports_flat_size_usd, self.balance, remaining_budget))
+
+        full_kelly = opp.edge / (1.0 - price)
+        kelly_fraction = 0.25 * max(0.0, min(opp.confidence, 1.0))
+        raw_size = self.balance * full_kelly * kelly_fraction
+
+        # Per-venue cap: a sports paper trade riding alongside a live weather
+        # book should use the paper cap, not the live cap, even though
+        # LIVE_TRADING is on globally.
+        opp_is_live = self._venue_is_live(opp)
+        global_cap = settings.live_max_position_usd if opp_is_live else settings.simulated_max_position_usd
+
+        # Cheap-tail boost: at entry <= cheap_tail_threshold the audit shows
+        # the bucket is profitable; multiply the cap so Kelly can size into it.
+        if price <= settings.cheap_tail_threshold and settings.cheap_tail_size_multiplier > 1.0:
+            global_cap = global_cap * settings.cheap_tail_size_multiplier
+
+        strategy_cap = opp.size_usd if opp.size_usd > 0 else global_cap
+
+        # remaining_budget computed once at the top against NAV (not cash).
+        return max(0.0, min(raw_size, global_cap, strategy_cap, remaining_budget))
+
     def open_position(self, opp: Opportunity) -> TradeRecord | None:
         if len(self.positions) >= settings.max_open_positions:
             logger.debug(f"Max positions reached ({settings.max_open_positions}), skipping")
@@ -108,72 +175,23 @@ class TradingEngine:
             logger.debug(f"Already have position for opportunity {opp.id}")
             return None
 
-        max_pos = settings.live_max_position_usd if (self.live_mode or self.us_live_mode) else settings.simulated_max_position_usd
-        size_usd = min(max_pos, self.balance * 0.1)
+        size_usd = self._size_position(opp)
         if size_usd < 1.0:
-            logger.warning("Balance too low to open new position")
+            logger.debug(
+                "Skipping {} — sized to ${:.2f} (edge={:.3f} conf={:.2f} bal=${:.2f})",
+                opp.market.question[:40], size_usd, opp.edge, opp.confidence, self.balance,
+            )
             return None
 
-        shares   = size_usd / opp.market_price
-        is_sports = bool(opp.us_market_slug)
+        shares       = size_usd / opp.market_price
+        is_sports    = bool(opp.us_market_slug)
+        execute_live = self._venue_is_live(opp)
 
-        # ── Live mode — only execute real orders, no paper simulation ─────────
-        if self.live_mode or self.us_live_mode:
-            trade = TradeRecord(
-                opportunity_id = opp.id,
-                market_id      = opp.market.id,
-                question       = opp.market.question,
-                side           = opp.side,
-                entry_price    = opp.market_price,
-                size_usd       = size_usd,
-                shares         = shares,
-                live_platform  = "polymarket_us" if is_sports else "polymarket_global",
-            )
+        # `live_platform` is a venue marker (NOT a "real order placed" marker).
+        # Sports paper trades carry "polymarket_us" so the sports exit pipeline
+        # in scanner/sports_graph.py finds them via the same filter as live ones.
+        venue = "polymarket_us" if is_sports else "polymarket_global"
 
-            if is_sports and self.us_live_mode:
-                quantity = max(1, int(size_usd / opp.market_price))
-                order = self._us_clob.place_order(
-                    market_slug = opp.us_market_slug,
-                    side        = str(opp.side),
-                    price       = opp.market_price,
-                    quantity    = quantity,
-                )
-                if not order:
-                    logger.warning("US live order FAILED for {} — skipping", opp.market.question[:45])
-                    return None
-                order_id = order.get("id")
-                trade = trade.model_copy(update={"live_order_id": order_id, "us_market_slug": opp.us_market_slug})
-                logger.success(
-                    "LIVE ORDER PLACED (US) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
-                    trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
-                )
-
-            elif not is_sports and self.live_mode:
-                token_id = opp.clob_token_id
-                if not token_id:
-                    logger.warning("No CLOB token ID for {} — skipping", opp.market.question[:45])
-                    return None
-                order_id = self._clob.place_order(
-                    token_id = token_id,
-                    side     = str(opp.side),
-                    price    = opp.market_price,
-                    size_usd = size_usd,
-                )
-                if not order_id:
-                    logger.warning("Global CLOB order FAILED for {} — skipping", opp.market.question[:45])
-                    return None
-                trade = trade.model_copy(update={"clob_order_id": order_id, "clob_token_id": token_id})
-                logger.success(
-                    "LIVE ORDER PLACED (global) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
-                    trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
-                )
-
-            # Only track position after confirmed live fill
-            self.positions[opp.id] = trade
-            self._append_trade(trade)
-            return trade
-
-        # ── Paper mode ────────────────────────────────────────────────────────
         trade = TradeRecord(
             opportunity_id = opp.id,
             market_id      = opp.market.id,
@@ -182,20 +200,66 @@ class TradingEngine:
             entry_price    = opp.market_price,
             size_usd       = size_usd,
             shares         = shares,
+            live_platform  = venue,
+            us_market_slug = opp.us_market_slug or None,
         )
+
+        if execute_live and is_sports:
+            quantity = max(1, int(size_usd / opp.market_price))
+            order = self._us_clob.place_order(
+                market_slug = opp.us_market_slug,
+                side        = str(opp.side),
+                price       = opp.market_price,
+                quantity    = quantity,
+            )
+            if not order:
+                logger.warning("US live order FAILED for {} — skipping", opp.market.question[:45])
+                return None
+            trade = trade.model_copy(update={"live_order_id": order.get("id")})
+            logger.success(
+                "LIVE ORDER PLACED (US) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
+                trade.side, trade.question[:45], trade.entry_price, size_usd, order.get("id"),
+            )
+
+        elif execute_live and not is_sports:
+            token_id = opp.clob_token_id
+            if not token_id:
+                logger.warning("No CLOB token ID for {} — skipping", opp.market.question[:45])
+                return None
+            order_id = self._clob.place_order(
+                token_id = token_id,
+                side     = str(opp.side),
+                price    = opp.market_price,
+                size_usd = size_usd,
+            )
+            if not order_id:
+                logger.warning("Global CLOB order FAILED for {} — skipping", opp.market.question[:45])
+                return None
+            trade = trade.model_copy(update={"clob_order_id": order_id, "clob_token_id": token_id})
+            logger.success(
+                "LIVE ORDER PLACED (global) | {} {} @ {:.3f} | ${:.2f} | order_id={}",
+                trade.side, trade.question[:45], trade.entry_price, size_usd, order_id,
+            )
+
+        else:
+            # Paper trade — decrement the paper book. No real order placed.
+            self.balance -= size_usd
+            logger.info(
+                f"PAPER OPEN  {trade.side} {trade.question[:45]}... "
+                f"@ {trade.entry_price:.3f} | ${size_usd:.2f} | "
+                f"venue={venue} opp_id={opp.id}"
+            )
 
         self.positions[opp.id] = trade
-        self.balance -= size_usd
         self._append_trade(trade)
-
-        logger.info(
-            f"OPEN  {trade.side} {trade.question[:45]}... "
-            f"@ {trade.entry_price:.3f} | ${size_usd:.2f} | "
-            f"opp_id={opp.id}"
-        )
         return trade
 
-    def close_position(self, opportunity_id: str, exit_price: float) -> TradeRecord:
+    def close_position(
+        self,
+        opportunity_id: str,
+        exit_price: float,
+        exit_reason: ExitReason | None = None,
+    ) -> TradeRecord:
         trade = self.positions.pop(opportunity_id)
 
         trade = trade.model_copy(update={
@@ -204,8 +268,12 @@ class TradingEngine:
             "closed_at":  datetime.now(timezone.utc),
         })
 
-        # Only adjust paper balance in paper mode — live balance is synced from CLOB
-        if not (self.live_mode or self.us_live_mode):
+        # A trade is "paper" iff no real order id was ever recorded for it.
+        # Per-trade routing matters when LIVE_TRADING=true but a venue's
+        # client is unwired (e.g. SPORTS_ALERT_ONLY=true): weather trades on
+        # the same engine are live, sports trades are paper.
+        was_live = bool(trade.clob_order_id or trade.live_order_id)
+        if not was_live:
             proceeds = exit_price * trade.shares
             self.balance += proceeds
 
@@ -219,16 +287,30 @@ class TradingEngine:
         )
 
         # ── Live execution — place sell / close orders ────────────────────────
-        if trade.live_platform == "polymarket_us" and self.us_live_mode:
-            if trade.us_market_slug:
-                self._us_clob.close_position(trade.us_market_slug)
-            if trade.pnl_usd < 0:
-                self._us_clob.record_loss(abs(trade.pnl_usd))
+        # MARKET_CLOSED uses synthetic 1.0/0.0 exit prices that no real order would
+        # fill at. Skip the live sell and let Polymarket auto-settle the position
+        # on resolution — paper book has already recorded P&L for tracking.
+        hold_to_settlement = exit_reason == ExitReason.MARKET_CLOSED
 
-        elif self.live_mode and trade.clob_token_id:
-            self._clob.sell_order(trade.clob_token_id, exit_price, trade.shares)
-            if trade.pnl_usd < 0:
-                self._clob.record_loss(abs(trade.pnl_usd))
+        if trade.live_order_id and self.us_live_mode:
+            if hold_to_settlement:
+                logger.info("Holding to US-platform settlement (exit_price={:.3f})", exit_price)
+            else:
+                if trade.us_market_slug:
+                    self._us_clob.close_position(trade.us_market_slug)
+                if trade.pnl_usd < 0:
+                    self._us_clob.record_loss(abs(trade.pnl_usd))
+
+        elif trade.clob_order_id and self.live_mode and trade.clob_token_id:
+            if hold_to_settlement:
+                logger.info(
+                    "Holding to Polymarket settlement — token={} exit_price={:.3f}",
+                    trade.clob_token_id[:12], exit_price,
+                )
+            else:
+                self._clob.sell_order(trade.clob_token_id, exit_price, trade.shares)
+                if trade.pnl_usd < 0:
+                    self._clob.record_loss(abs(trade.pnl_usd))
 
         return trade
 
@@ -247,8 +329,11 @@ class TradingEngine:
     # ─── Stats & display ──────────────────────────────────────────────────────
 
     def _starting_balance(self) -> float:
-        if self.live_mode and self._live_starting_balance is not None:
-            return self._live_starting_balance
+        # Paper book starting balance. trader.balance is the paper cash
+        # ledger reconstructed from the JSONL trade log, so PnL must be
+        # measured against the paper starting balance regardless of
+        # whether a live CLOB client is also wired in. Live wallet PnL
+        # is tracked separately via DashboardState.live_balance.
         return settings.simulated_starting_balance
 
     def total_pnl(self) -> float:

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 import re
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from loguru import logger
 from polybot.config import settings
 
@@ -317,6 +317,108 @@ async def health_check() -> JSONResponse:
     })
 
 
+# ─── PWA: manifest + icons ────────────────────────────────────────────────────
+
+_ICON_CACHE: dict[int, bytes] = {}
+
+
+def _build_icon_png(size: int) -> bytes:
+    """Generate a square PNG icon (cyan→green gradient + centered dark diamond).
+
+    Pure-stdlib PNG writer — no Pillow dependency. Cached per size.
+    """
+    cached = _ICON_CACHE.get(size)
+    if cached is not None:
+        return cached
+
+    import struct
+    import zlib
+
+    half = size / 2
+    # Diamond half-diagonal — 42% of size leaves a clean margin for iOS masking.
+    diag = size * 0.42
+    cyan  = (0x00, 0xd4, 0xff)
+    green = (0x3d, 0xdc, 0x84)
+    dark  = (0x06, 0x11, 0x1a)
+    inv_n = 1.0 / max(1, 2 * (size - 1))
+
+    raw = bytearray()
+    for y in range(size):
+        raw.append(0)  # PNG filter: None
+        dy = abs(y - half)
+        for x in range(size):
+            if abs(x - half) + dy <= diag:
+                raw.append(dark[0]); raw.append(dark[1]); raw.append(dark[2])
+            else:
+                t = (x + y) * inv_n
+                u = 1.0 - t
+                raw.append(int(cyan[0] * u + green[0] * t))
+                raw.append(int(cyan[1] * u + green[1] * t))
+                raw.append(int(cyan[2] * u + green[2] * t))
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+        + _chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + _chunk(b"IEND", b"")
+    )
+    _ICON_CACHE[size] = png
+    return png
+
+
+_MANIFEST = {
+    "name":             "Polybot Dashboard",
+    "short_name":       "Polybot",
+    "description":      "Live polymarket scanner + paper/live trading dashboard.",
+    "start_url":        "/",
+    "scope":            "/",
+    "display":          "standalone",
+    "orientation":      "portrait",
+    "background_color": "#070b12",
+    "theme_color":      "#070b12",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    ],
+}
+
+
+@app.get("/manifest.webmanifest")
+async def manifest() -> JSONResponse:
+    return JSONResponse(
+        _MANIFEST,
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/icon-192.png")
+async def icon_192() -> Response:
+    return Response(
+        content=_build_icon_png(192),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
+@app.get("/icon-512.png")
+async def icon_512() -> Response:
+    return Response(
+        content=_build_icon_png(512),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
 # ─── HTML dashboard ───────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -355,7 +457,16 @@ async def run_server(host: str = "0.0.0.0", port: int = 8765) -> None:
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<meta name="theme-color" content="#070b12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Polybot">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
 <title>Polybot Dashboard</title>
 <style>
 /* ── Reset & base ─────────────────────────────────────────────────── */
@@ -435,6 +546,30 @@ html,body{height:100%;background:#0d1117;font-family:'Courier New',monospace;col
   pointer-events:none;display:none;box-shadow:0 6px 28px rgba(0,212,255,.22)}
 #tip b{color:#00d4ff;font-size:9px;font-weight:700;letter-spacing:.08em;display:block;margin-bottom:3px}
 #conn{position:fixed;bottom:8px;right:10px;font-size:9px;color:#4a5568;font-family:'Courier New',monospace}
+
+/* ── Phone-only app dashboard ──────────────────────────────────────── */
+#mobileApp{display:none}
+
+@media (max-width:720px) and (pointer:coarse){
+  html,body{height:100%;min-height:100%;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-ui,sans-serif;font-size:14px;background:#070b12;color:#eef6ff;overflow:hidden}
+  #app{display:none}
+  #conn{top:14px;right:16px;bottom:auto;z-index:50;font-family:inherit;font-size:11px}
+  #tip{display:none!important}
+  #mobileApp{display:flex;height:100dvh;min-height:100vh;flex-direction:column;background:
+    radial-gradient(circle at 20% -10%,rgba(0,212,255,.22),transparent 35%),
+    radial-gradient(circle at 90% 0%,rgba(199,125,255,.16),transparent 30%),#070b12;
+    padding:calc(env(safe-area-inset-top) + 10px) 14px calc(env(safe-area-inset-bottom) + 10px);gap:12px;overflow:hidden}
+  .m-top{flex-shrink:0;display:flex;align-items:center;gap:10px;min-height:38px}
+  .m-logo{width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg,#00d4ff,#3ddc84);box-shadow:0 0 22px rgba(0,212,255,.28);display:grid;place-items:center;color:#06111a;font-weight:900}
+  .m-title{min-width:0;flex:1}.m-title b{display:block;font-size:16px;letter-spacing:.02em}.m-title span{display:block;color:#8090a6;font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .m-pill{border:1px solid rgba(61,220,132,.35);background:rgba(61,220,132,.10);color:#3ddc84;border-radius:999px;padding:5px 9px;font-size:11px;font-weight:800;letter-spacing:.04em}
+  .m-hero{flex-shrink:0;border:1px solid rgba(0,212,255,.20);background:linear-gradient(180deg,rgba(15,25,35,.92),rgba(10,17,26,.88));border-radius:24px;padding:16px;box-shadow:0 18px 50px rgba(0,0,0,.28)}
+  .m-hero-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.m-eyebrow{color:#8090a6;font-size:11px;font-weight:800;letter-spacing:.10em;text-transform:uppercase}.m-nav{font-size:34px;line-height:1.05;font-weight:900;letter-spacing:-.04em;margin-top:4px}.m-pnl{margin-top:5px;font-size:13px;font-weight:800}.m-spark{margin-top:14px;color:#3ddc84;font-family:'Courier New',monospace;font-size:16px;letter-spacing:1px;white-space:nowrap;overflow:hidden}
+  .m-quick{flex-shrink:0;display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.m-stat{border:1px solid rgba(255,255,255,.08);background:rgba(15,25,35,.72);border-radius:18px;padding:11px 10px;min-width:0}.m-stat span{display:block;color:#8090a6;font-size:10px;font-weight:800;letter-spacing:.08em}.m-stat b{display:block;margin-top:5px;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .m-tabs{flex-shrink:0;display:flex;gap:8px;overflow-x:auto;padding-bottom:1px;scrollbar-width:none}.m-tabs::-webkit-scrollbar{display:none}.m-tab{border:1px solid rgba(255,255,255,.08);background:rgba(15,25,35,.68);color:#8090a6;border-radius:999px;padding:9px 13px;font-size:12px;font-weight:900;letter-spacing:.04em;white-space:nowrap}.m-tab.active{border-color:rgba(0,212,255,.65);background:rgba(0,212,255,.13);color:#00d4ff}
+  .m-screen{flex:1;min-height:0;overflow-y:auto;padding-bottom:72px;scrollbar-width:none}.m-screen::-webkit-scrollbar{display:none}.m-card{border:1px solid rgba(255,255,255,.08);background:rgba(15,25,35,.76);border-radius:22px;padding:14px;margin-bottom:10px}.m-card h3{font-size:12px;letter-spacing:.10em;text-transform:uppercase;color:#8090a6;margin-bottom:10px}.m-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid rgba(255,255,255,.055)}.m-row:first-of-type{border-top:0}.m-main{min-width:0}.m-main b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.m-main span{display:block;color:#8090a6;font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.m-side{text-align:right;flex-shrink:0;font-weight:900}.m-side span{display:block;color:#8090a6;font-size:11px;font-weight:700;margin-top:3px}.m-empty{text-align:center;color:#8090a6;padding:24px 0}.m-bottom{position:fixed;left:14px;right:14px;bottom:calc(env(safe-area-inset-bottom) + 10px);height:58px;border:1px solid rgba(255,255,255,.10);background:rgba(8,13,21,.86);backdrop-filter:blur(18px);border-radius:22px;display:grid;grid-template-columns:repeat(4,1fr);padding:6px;z-index:40;box-shadow:0 12px 40px rgba(0,0,0,.38)}.m-navbtn{border:0;background:transparent;color:#8090a6;border-radius:16px;font-size:10px;font-weight:900;letter-spacing:.03em}.m-navbtn b{display:block;font-size:16px;line-height:1.1}.m-navbtn.active{background:rgba(0,212,255,.13);color:#00d4ff}
+}
+
 </style>
 </head>
 <body>
@@ -452,6 +587,14 @@ html,body{height:100%;background:#0d1117;font-family:'Courier New',monospace;col
     <div id="loghdr">◈ EVENT LOG</div>
     <div id="logbody"></div>
   </div>
+</div>
+<div id="mobileApp">
+  <div class="m-top" id="mTop"></div>
+  <div class="m-hero" id="mHero"></div>
+  <div class="m-quick" id="mQuick"></div>
+  <div class="m-tabs" id="mTabs"></div>
+  <div class="m-screen" id="mScreen"></div>
+  <div class="m-bottom" id="mBottom"></div>
 </div>
 <div id="tip"><b id="tl"></b><span id="tb"></span></div>
 <div id="conn">○ connecting</div>
@@ -920,6 +1063,56 @@ function renderZone(zoneId,S,fm){
   </div>`;
 }
 
+
+// ── Phone-only app renderer ───────────────────────────────────────────────────
+let mobileTab=localStorage.getItem('pb-mobile-tab')||'home';
+function money(n){return '$'+(Number(n||0)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});}
+function prob(n){return ((Number(n||0))*100).toFixed(1)+'%';}
+function signedMoney(n){n=Number(n||0);return (n>=0?'+':'')+money(n);}
+function setMobileTab(tab){mobileTab=tab;localStorage.setItem('pb-mobile-tab',tab);if(lastData){const fm={};[...(lastData.feed||[]),...(lastData.cryptoFeed||[])].forEach(m=>{fm[m.id]={yes:m.yes_price||0,hrs:m.hours_until_close||0};});renderMobile(lastData,fm);}}
+function mobileMarketTabs(S){
+  const tabs=[['wx','Weather'],['crypto','Crypto']]; if(S.sportsEnabled)tabs.push(['spt','Sports']);
+  return tabs.map(([id,label])=>`<button class="m-tab${currentMarket===id?' active':''}" onclick="showMarket('${id}')">${label}</button>`).join('')+
+    `${S.liveMode?`<button class="m-tab${currentAccount==='live'?' active':''}" onclick="showAccount(currentAccount==='live'?'simulated':'live')">${currentAccount==='live'?'Live':'Paper'}</button>`:''}`;
+}
+function mCard(title,body){return`<section class="m-card"><h3>${title}</h3>${body}</section>`;}
+function mRow(title,sub,side,sideSub='',col=C.white){return`<div class="m-row"><div class="m-main"><b>${title}</b>${sub?`<span>${sub}</span>`:''}</div><div class="m-side" style="color:${col}">${side}${sideSub?`<span>${sideSub}</span>`:''}</div></div>`;}
+function mobilePositions(S,fm){
+  let positions=S.positions||[];const isCrypto=currentMarket==='crypto',isSpt=currentMarket==='spt';
+  if(isLive())positions=positions.filter(p=>p.live);else if(isSpt)positions=positions.filter(p=>!p.live&&p.platform==='polymarket_us');else positions=positions.filter(p=>!p.live&&(isCrypto?CRYPTO_RE.test(p.q):!CRYPTO_RE.test(p.q)));
+  const cf=isSpt?condenseGame:isCrypto?condenseCrypto:condense;
+  if(!positions.length)return mCard('Open positions',`<div class="m-empty">no open positions</div>`);
+  return mCard('Open positions',positions.slice(0,8).map(p=>{const m=fm[p.mid],cy=m?m.yes:null,cs=cy!=null?(p.side==='YES'?cy:1-cy):null,ur=cs!=null?((cs-p.entry)*p.shares):null;return mRow(cf(p.q),`${p.side} · entry ${p.entry.toFixed(3)} · now ${cs!=null?cs.toFixed(3):'—'}`,ur!=null?signedMoney(ur):'—','unreal',ur==null?C.dim:ur>=0?C.green:C.red);}).join(''));
+}
+function mobileOpportunities(S){
+  const isCrypto=currentMarket==='crypto',isSpt=currentMarket==='spt';
+  if(isSpt){const opps=S.sptOpps||[];if(!opps.length)return mCard('Sports edges',`<div class="m-empty">scanning for sports edges...</div>`);return mCard('Sports edges',opps.slice(0,8).map(o=>mRow(condenseGame(o.q),`${o.side} · US ${(o.usPx||0).toFixed(3)} · global ${(o.globalPx||0).toFixed(3)}`,'+'+((o.edge||0)*100).toFixed(1)+'%','edge',(o.edge||0)>=.05?C.green:C.yellow)).join(''));}
+  const opps=(S.opps||[]).filter(o=>isCrypto?o.strat!=='WX':o.strat==='WX');const cf=isCrypto?condenseCrypto:condense;
+  if(!opps.length)return mCard('Opportunities',`<div class="m-empty">scanning...</div>`);
+  return mCard('Opportunities',opps.slice(0,8).map(o=>mRow(cf(o.q),`${o.side} · market ${prob(o.mkt)} · model ${prob(o.mdl)}`,'+'+((o.edge||0)*100).toFixed(1)+'%','edge',ec(o.edge||0))).join(''));
+}
+function mobileFeed(S){
+  if(currentMarket==='spt'){const feed=S.sptFeed||[];if(!feed.length)return mCard('Sports feed',`<div class="m-empty">waiting for sports scan...</div>`);return mCard('Sports feed',feed.slice(0,12).map(p=>mRow(condenseGame(p.title||p.slug||''),`US ${(p.usPrice||0).toFixed(3)} · global ${(p.globalPrice||0).toFixed(3)}`,(p.edge>=0?'+':'')+(p.edge||0).toFixed(3),'edge',Math.abs(p.edge||0)>=.05?C.green:C.dim)).join(''));}
+  const isCrypto=currentMarket==='crypto',feed=isCrypto?(S.cryptoFeed||[]):(S.feed||[]),cf=isCrypto?condenseCrypto:condense;
+  if(!feed.length)return mCard(isCrypto?'Crypto markets':'Weather markets',`<div class="m-empty">fetching...</div>`);
+  return mCard(isCrypto?'Crypto markets':'Weather markets',feed.slice(0,12).map(m=>mRow(cf(m.question||''),`liq $${Math.round(m.liquidity_usd||0).toLocaleString()} · ${Math.round(m.hours_until_close||0)}h`,(m.yes_price||0).toFixed(3),'YES',(m.yes_price||0)>=.5?C.green:C.red)).join(''));
+}
+function mobileActivity(S){
+  const events=(S.events||[]).slice(-24).reverse();
+  return mCard('Activity',events.length?events.map(e=>mRow(e.msg,e.ts,e.lv||'INFO','',({ERROR:C.red,WARN:C.yellow,GOOD:C.green,TRADE:C.cyan,EXIT:C.magenta}[e.lv]||C.dim))).join(''):`<div class="m-empty">no events yet</div>`);
+}
+function renderMobile(S,fm){
+  const app=document.getElementById('mobileApp');if(!app)return;
+  const tr=isLive()?(S.liveStats||{}):(S.trader||{}),pnl=Number(tr.totalPnl||0),nav=Number(tr.nav||0);
+  document.getElementById('mTop').innerHTML=`<div class="m-logo">◆</div><div class="m-title"><b>Polybot</b><span>scan #${S.scanNum} · next <span id="mhcountdown">${S.nextScanIn}</span>s · <span id="mhclock">${fmtNow()}</span></span></div><div class="m-pill">${isLive()?'LIVE':'PAPER'}</div>`;
+  document.getElementById('mHero').innerHTML=`<div class="m-hero-row"><div><div class="m-eyebrow">Net asset value</div><div class="m-nav">${money(nav)}</div><div class="m-pnl" style="color:${pnl>=0?C.green:C.red}">${pnl>=0?'▲':'▼'} ${signedMoney(pnl)} (${(tr.pnlPct||0)>=0?'+':''}${(tr.pnlPct||0).toFixed(2)}%)</div></div><div style="text-align:right;color:${C.dim};font-size:12px">open<br><b style="color:${C.cyan};font-size:22px">${tr.openPos||0}</b></div></div><div class="m-spark" style="color:${pnl>=0?C.green:C.red}">${spark(S.navHistory||[],22)}</div>`;
+  document.getElementById('mQuick').innerHTML=`<div class="m-stat"><span>Balance</span><b>${money(tr.balance||0)}</b></div><div class="m-stat"><span>Win rate</span><b style="color:${(tr.winRate||0)>=.55?C.green:C.yellow}">${((tr.winRate||0)*100).toFixed(0)}%</b></div><div class="m-stat"><span>Edges</span><b style="color:${C.yellow}">${currentMarket==='spt'?(S.sptOpps||[]).length:(S.opps||[]).length}</b></div>`;
+  document.getElementById('mTabs').innerHTML=mobileMarketTabs(S);
+  const screens={home:mobilePositions(S,fm)+mobileOpportunities(S),markets:mobileFeed(S),stats:mCard('Scanner',modScanner(S))+mCard('P&L',modPnl(S)),log:mobileActivity(S)};
+  document.getElementById('mScreen').innerHTML=screens[mobileTab]||screens.home;
+  document.getElementById('mBottom').innerHTML=[['home','⌂','Home'],['markets','◈','Markets'],['stats','⌁','Stats'],['log','☰','Log']].map(([id,ico,lbl])=>`<button class="m-navbtn${mobileTab===id?' active':''}" onclick="setMobileTab('${id}')"><b>${ico}</b>${lbl}</button>`).join('');
+}
+
 // ── Full render ───────────────────────────────────────────────────────────────
 let lastData=null,lastScanNum=-1;
 
@@ -951,6 +1144,7 @@ function fullRender(S){
 
   // Zones
   ['left','ct','cb','rt','rm','rb'].forEach(z=>renderZone(z,S,fm));
+  renderMobile(S,fm);
 
   // Event log
   const lvC={INFO:C.text,TRADE:C.cyan,EXIT:C.magenta,GOOD:C.green,WARN:C.yellow,ERROR:C.red};
@@ -976,6 +1170,8 @@ function tickUpdate(nextScanIn,sptNextIn){
   const hp=document.getElementById('hpulse');if(hp)hp.textContent=(pulse?'● ':'○ ')+'SCANNING';
   const hcd=document.getElementById('hcountdown');if(hcd)hcd.textContent=nextScanIn;
   const hck=document.getElementById('hclock');if(hck)hck.textContent=fmtNow();
+  const mhcd=document.getElementById('mhcountdown');if(mhcd)mhcd.textContent=nextScanIn;
+  const mhck=document.getElementById('mhclock');if(mhck)mhck.textContent=fmtNow();
   const hsp=document.getElementById('hsptcountdown');if(hsp)hsp.textContent=Math.max(0,(sptNextIn||0));
   const hsp2=document.getElementById('hsptcnt2');if(hsp2)hsp2.textContent=Math.max(0,(sptNextIn||0));
 }

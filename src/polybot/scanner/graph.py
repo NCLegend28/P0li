@@ -31,6 +31,7 @@ from polybot.models import MarketCategory
 from polybot.scanner.state import ScanState
 from polybot.strategies.crypto import evaluate_crypto_markets
 from polybot.strategies.exit import ExitSignal, compute_exit_signals
+from polybot.strategies.llm_picker import pick_opportunities
 from polybot.strategies.weather import evaluate_weather_markets, parse_question
 
 
@@ -141,17 +142,16 @@ async def fetch_forecasts(state: ScanState) -> dict[str, Any]:
 
     _sem = asyncio.Semaphore(5)
 
-    async def _fetch_one(city: str, td: str) -> tuple[str, CityForecast | None]:
-        async with _sem:
-            await asyncio.sleep(0.1)
-            try:
-                async with OpenMeteoClient() as meteo:
+    async with OpenMeteoClient() as meteo:
+        async def _fetch_one(city: str, td: str) -> tuple[str, CityForecast | None]:
+            async with _sem:
+                try:
                     return city, await meteo.fetch_forecast(city, target_date=td)
-            except Exception as exc:
-                logger.warning(f"Forecast failed for {city}: {exc}")
-                return city, None
+                except Exception as exc:
+                    logger.warning(f"Forecast failed for {city}: {exc}")
+                    return city, None
 
-    results = await asyncio.gather(*[_fetch_one(c, td) for c, td in city_dates.items()])
+        results = await asyncio.gather(*[_fetch_one(c, td) for c, td in city_dates.items()])
 
     forecast_cache: dict[str, CityForecast] = {
         city: fc for city, fc in results if fc is not None
@@ -210,6 +210,22 @@ async def run_strategies(state: ScanState) -> dict[str, Any]:
         )
 
     return {"opportunities": all_opps}
+
+
+# ─── Node: llm_pick ───────────────────────────────────────────────────────────
+
+async def llm_pick(state: ScanState) -> dict[str, Any]:
+    """
+    Optional LLM filter over the candidate opportunities. Disabled by default
+    (settings.llm_picker_enabled). When disabled this node is a no-op.
+    """
+    if not state.opportunities:
+        return {}
+    picked = await pick_opportunities(
+        state.opportunities,
+        scan_number=state.scan_number,
+    )
+    return {"opportunities": picked}
 
 
 # ─── Node: monitor_positions ──────────────────────────────────────────────────
@@ -287,6 +303,7 @@ def build_scanner_graph() -> Any:
     builder.add_node("fetch_forecasts",     fetch_forecasts)
     builder.add_node("fetch_crypto_prices", fetch_crypto_prices)
     builder.add_node("run_strategies",      run_strategies)
+    builder.add_node("llm_pick",            llm_pick)
     builder.add_node("monitor_positions",   monitor_positions)
 
     builder.set_entry_point("fetch_markets")
@@ -294,7 +311,8 @@ def build_scanner_graph() -> Any:
     builder.add_edge("filter_markets",      "fetch_forecasts")
     builder.add_edge("fetch_forecasts",     "fetch_crypto_prices")
     builder.add_edge("fetch_crypto_prices", "run_strategies")
-    builder.add_edge("run_strategies",      "monitor_positions")
+    builder.add_edge("run_strategies",      "llm_pick")
+    builder.add_edge("llm_pick",            "monitor_positions")
     builder.add_edge("monitor_positions",   END)
 
     return builder.compile()

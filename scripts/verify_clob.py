@@ -1,4 +1,5 @@
 import os
+from typing import Any, cast
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
@@ -25,12 +26,26 @@ ok = client.get_ok()
 print(f"  CLOB reachable:   {ok}")
 
 print("Checking USDC balance...")
+<<<<<<< HEAD
 bal = client.get_balance_allowance(
     params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
 )
 usdc       = float(bal.get("balance", 0)) / 1e6
 allowances = bal.get("allowances", {})
 max_allowance = max((int(v) for v in allowances.values()), default=0)
+=======
+bal = cast(Any, client.get_balance_allowance(
+    params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+))
+usdc = float(bal.get("balance", 0)) / 1e6
+# py-clob-client now returns an `allowances` map keyed by exchange/spender
+# contract, not a single `allowance` field. Treat any positive spender
+# allowance as usable; old clients may still return `allowance`.
+if "allowances" in bal:
+    allowance = max(float(v) for v in bal.get("allowances", {}).values()) / 1e6
+else:
+    allowance = float(bal.get("allowance", 0)) / 1e6
+>>>>>>> feat/eml-node-research
 print(f"  USDC balance:     ${usdc:,.2f}")
 print(f"  USDC allowance:   {'unlimited' if max_allowance > 10**30 else f'${max_allowance/1e6:,.2f}'} ({len(allowances)} contracts approved)")
 if max_allowance == 0:
