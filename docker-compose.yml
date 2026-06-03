@@ -47,6 +47,12 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=32M
+    volumes:
+      # Same trades volume as weather-bot. Dashboard needs a writable path for
+      # its loguru file sink (defaults to /app/data/trades/bot.log). To avoid
+      # both services appending to the same file, set
+      # LOG_FILE_PATH=data/trades/dashboard.log in .env.dashboard.
+      - trades_data:/app/data/trades
     ports:
       - "127.0.0.1:8766:8766"
     depends_on:
