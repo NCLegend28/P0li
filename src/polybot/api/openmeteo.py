@@ -236,53 +236,21 @@ class OpenMeteoClient:
         Fetch daily high/low for a city.
         target_date: ISO date string e.g. '2026-03-24', defaults to today.
 
-<<<<<<< HEAD
         For past dates (more than 2 days ago) uses the Open-Meteo archive API
         so the backtest gets actual observed temperatures rather than a 7-day
         forward window that can never reach historical dates.
-=======
+
         Cached in-process for _CACHE_TTL_SEC to avoid Open-Meteo 429s on the free tier.
->>>>>>> feat/eml-node-research
         """
         from datetime import date as _date
         key = city_key.upper()
         lat, lon = CITY_COORDS[key]
 
-<<<<<<< HEAD
         today = _date.today()
-=======
         cache_key = (key, target_date)
         cached = _FORECAST_CACHE.get(cache_key)
         if cached is not None and (time.monotonic() - cached[1]) < _CACHE_TTL_SEC:
             return cached[0]
-
-        params = {
-            "latitude":    lat,
-            "longitude":   lon,
-            "daily":       "temperature_2m_max,temperature_2m_min",
-            "temperature_unit": "celsius",
-            "timezone":    "auto",
-            "forecast_days": 7,
-        }
-
-        try:
-            resp = await self._client.get("/forecast", params=params)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            # Respect Retry-After on 429 so the retry decorator actually waits long enough.
-            if exc.response.status_code == 429:
-                ra = exc.response.headers.get("Retry-After")
-                wait = 60.0
-                if ra:
-                    try:
-                        wait = max(wait, float(ra))
-                    except ValueError:
-                        pass
-                logger.warning(f"Open-Meteo 429 for {key} — sleeping {wait:.0f}s before retry")
-                await asyncio.sleep(wait)
-            raise
-        raw = resp.json()
->>>>>>> feat/eml-node-research
 
         # Determine if we should hit the archive endpoint
         use_archive = False
